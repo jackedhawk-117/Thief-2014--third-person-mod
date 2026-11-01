@@ -1,0 +1,16 @@
+# Commercial Game Binaries
+Shipping-ThiefGame.exe
+*.exe
+
+# Intermediate compilation artifacts
+*.o
+
+# Runtime logs
+*.log
+thief_camera.log
+
+# System & Editor artifacts
+.system_generated/
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,158 @@
+evidence_id: ev_25432c075488afcee6ad576eeceb27b1786ebb56734789a1776f7de4ac24ae16
+subject:
+  name: Shipping-ThiefGame.exe
+  digest:
+    sha256: ee707ecd140dc88317b631de4eb0a6173754bdde8b5a15590d4c06e0471edbf9
+  local_path: /home/jackedhawk117/reverse-engineering/Thief 2014/Shipping-ThiefGame.exe
+  format: pe
+  architecture: null
+provider:
+  id: rea-artifact-graph
+  name: REA safe artifact graph provider
+  version: "1"
+analysis_profile: null
+predicate_type: rea.analysis
+operation: inspect_artifact
+parameters:
+  integrity_policy: fail
+raw_result: null
+normalized_result:
+  inspection_id: ai_8e8ca3eb0a7f5ee219a45cd64dcf786be1d5982f8d9c19914df82dc0b5d12cb5
+  subject:
+    manifest_id: agm_741f01f49baaf08ce369f31c93f1862a3ddcd6c776a24efc3490798f3fe31043
+    root_artifact_id: art_c866cead66fd166e11bd44597e6e06ccdb7c8bef519350d51f9d3b2ffd2f132b
+    root_sha256: ee707ecd140dc88317b631de4eb0a6173754bdde8b5a15590d4c06e0471edbf9
+    root_format: pe
+  substeps[1]:
+    - substep_id: ais_4c3cc75df3a0778562d3310e3ba4549f3493e7b4feaf46c01fc27e65a38cd77c
+      operation: inventory_artifact
+      status: completed
+      evidence_id: ev_50cbb0cd5ffc647994cc3a8d3afed35b22e51b2b4cef0cf1c3ccae5ac05e1d0f
+      evidence:
+        evidence_id: ev_50cbb0cd5ffc647994cc3a8d3afed35b22e51b2b4cef0cf1c3ccae5ac05e1d0f
+        subject:
+          name: Shipping-ThiefGame.exe
+          digest:
+            sha256: ee707ecd140dc88317b631de4eb0a6173754bdde8b5a15590d4c06e0471edbf9
+          local_path: /home/jackedhawk117/reverse-engineering/Thief 2014/Shipping-ThiefGame.exe
+          format: pe
+          architecture: null
+        provider:
+          id: rea-artifact-graph
+          name: REA safe artifact graph provider
+          version: "1"
+        analysis_profile: null
+        predicate_type: rea.analysis
+        operation: inventory_artifact
+        parameters:
+          integrity_policy: fail
+        raw_result: null
+        normalized_result:
+          manifest:
+            manifest_id: agm_741f01f49baaf08ce369f31c93f1862a3ddcd6c776a24efc3490798f3fe31043
+            root_artifact_id: art_c866cead66fd166e11bd44597e6e06ccdb7c8bef519350d51f9d3b2ffd2f132b
+            root_sha256: ee707ecd140dc88317b631de4eb0a6173754bdde8b5a15590d4c06e0471edbf9
+            root_format: pe
+            graph_sha256: 5ddd538e75b638631acf47eecb060ec967656d07a3e87ac351cb7a95726dfbd2
+            node_count: 1
+            occurrence_count: 1
+            edge_count: 0
+          nodes[1]:
+            - artifact_id: art_c866cead66fd166e11bd44597e6e06ccdb7c8bef519350d51f9d3b2ffd2f132b
+              format: pe
+              sha256: ee707ecd140dc88317b631de4eb0a6173754bdde8b5a15590d4c06e0471edbf9
+              size: 37713920
+              media_type: null
+              architecture: null
+              content_state: materialized
+              limitations: []
+          occurrences[1]:
+            - occurrence_id: occ_85570b2f6e1a6dd86e0940c8a31c528c9690b3445f89e5ab7f6d35505fa2c070
+              artifact_id: art_c866cead66fd166e11bd44597e6e06ccdb7c8bef519350d51f9d3b2ffd2f132b
+              parent_occurrence_id: null
+              logical_path: .
+              entry_kind: file
+              artifact_kind: executable
+              artifact_format: pe
+              declared_size: 37713920
+              compressed_size: null
+              executable: true
+              encrypted: false
+              hash_status: verified
+              source_location: null
+              limitations: []
+          edges: []
+          provenance: []
+          integrity_contradictions: []
+          coverage:
+            scope: root
+            status: complete
+          limitations[1]: Artifact has no child container entries.
+        confidence: observed
+        authority: shipped-artifact
+        environment: null
+        limitations[1]: Artifact has no child container entries.
+        relationship_coverage: null
+        locations: []
+        evidence_links: []
+  observations[1]:
+    - observation_id: aio_041bfcbe43bb4ecf63e4951af8de607b5100e26c3613f49a02708ca0fedce9a5
+      kind: root-manifest
+      subject: art_c866cead66fd166e11bd44597e6e06ccdb7c8bef519350d51f9d3b2ffd2f132b
+      value:
+        manifest_id: agm_741f01f49baaf08ce369f31c93f1862a3ddcd6c776a24efc3490798f3fe31043
+        root_artifact_id: art_c866cead66fd166e11bd44597e6e06ccdb7c8bef519350d51f9d3b2ffd2f132b
+        root_sha256: ee707ecd140dc88317b631de4eb0a6173754bdde8b5a15590d4c06e0471edbf9
+        root_format: pe
+        graph_sha256: 5ddd538e75b638631acf47eecb060ec967656d07a3e87ac351cb7a95726dfbd2
+        node_count: 1
+        occurrence_count: 1
+        edge_count: 0
+      evidence_id: ev_50cbb0cd5ffc647994cc3a8d3afed35b22e51b2b4cef0cf1c3ccae5ac05e1d0f
+  hypotheses[1]:
+    - hypothesis_id: aih_7b33347ab9987ff5401f8783059d8a13815e6264f934a54018b8dbea2fc539ab
+      statement: The PE artifact may contain managed CLI metadata or native code; inventory bytes alone do not distinguish them.
+      confidence: low
+      basis_evidence_ids[1]: ev_50cbb0cd5ffc647994cc3a8d3afed35b22e51b2b4cef0cf1c3ccae5ac05e1d0f
+      limitation: Format classification proposes a bounded follow-up; it is not semantic proof.
+  contradictions: []
+  unexplored_branches[2]:
+    - branch_id: aib_89eba007629819a76695e64f358c6974aeaa05d575455ee08e7bab29d66bb214
+      reason: format-specific-analysis-required
+      detail: inspect_managed_artifact was not run by provider-neutral artifact inspection.
+      next_probe:
+        operation: inspect_managed_artifact
+        rationale: Check execution-free CLI metadata before choosing a deep native provider.
+        authority: managed-static-analysis
+      evidence_id: ev_50cbb0cd5ffc647994cc3a8d3afed35b22e51b2b4cef0cf1c3ccae5ac05e1d0f
+    - branch_id: aib_f33bf859e4b092c9687a306d2d2c5acbdafbc5739a4ee404998d1a56a8403682
+      reason: format-specific-analysis-required
+      detail: open_binary was not run by provider-neutral artifact inspection.
+      next_probe:
+        operation: open_binary
+        rationale: Open as native code only when managed inspection reports a native or mixed boundary.
+        authority: native-analysis-provider
+      evidence_id: ev_50cbb0cd5ffc647994cc3a8d3afed35b22e51b2b4cef0cf1c3ccae5ac05e1d0f
+  next_probes[2]{operation,rationale,authority}:
+    inspect_managed_artifact,Check execution-free CLI metadata before choosing a deep native provider.,managed-static-analysis
+    open_binary,Open as native code only when managed inspection reports a native or mixed boundary.,native-analysis-provider
+  coverage:
+    status: complete-within-substeps
+    substeps_completed: 1
+    observations_retained: 1
+    observations_omitted: 0
+    hypotheses_retained: 1
+    hypotheses_omitted: 0
+    unexplored_branches_retained: 2
+    unexplored_branches_omitted: 0
+    next_probes_retained: 2
+    next_probes_omitted: 0
+  evidence_links[1]: ev_50cbb0cd5ffc647994cc3a8d3afed35b22e51b2b4cef0cf1c3ccae5ac05e1d0f
+  limitations[2]: Artifact has no child container entries.,Inspection derives bounded static hypotheses and next probes; it does not execute the artifact or claim format-specific semantics.
+confidence: observed
+authority: shipped-artifact
+environment: null
+limitations[2]: Artifact has no child container entries.,Inspection derives bounded static hypotheses and next probes; it does not execute the artifact or claim format-specific semantics.
+relationship_coverage: null
+locations: []
+evidence_links[1]: ev_50cbb0cd5ffc647994cc3a8d3afed35b22e51b2b4cef0cf1c3ccae5ac05e1d0f
