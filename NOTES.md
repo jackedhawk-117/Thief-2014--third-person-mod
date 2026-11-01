@@ -439,6 +439,47 @@ Eidos Montréal created an extensive hierarchy of `UThiefCameraBehavior` subclas
   - `Mesh2` (+0x14A8, torso and 1st-person arms/hands) is explicitly kept visible (`BitFlags &= ~0x00400000`).
   - In third person, `AThiefPawn_Hero_ShowThirdPersonMesh(hero)` (`0x140B3B850`) is called with `GIsFirstPersonView = 0`, unhiding head, neck, hood, torso, and accessory meshes (`Mesh3`).
 
+---
+
+## Phase 14: Restoring 3rd Person Toggle, Full Head & Torso Rendering, and 1P Hand Visibility
+
+### 1. Root Cause Analysis: Lost 3rd Person & Non-functional F4 Toggle
+- **Observation**: Mod was locked in 1st person; pressing F4 had no visible effect.
+- **Decompilation Findings**:
+  - In `IsMinigameOrCutsceneActive`, `pAction` at `hero + 0x10A8 -> +0x68 -> +0x104` was tested for `pAction != nullptr`.
+  - In UE3/Thief, Garrett has an active action (idle, walk, run) on every frame. Checking `pAction != 0` caused `IsMinigameOrCutsceneActive` to return `true` continuously on 100% of frames!
+  - Consequently, `bEffective3P = g_Config.bEnabled && !bInMinigame` was permanently `false`, locking the camera in 1P.
+  - Native decompilation of `UThiefCamera_UpdateCameraCollision` (`0x140C072F0`) revealed the true check used by Eidos:
+    ```c
+    lVar1 = *(longlong*)(*(longlong*)(*(longlong*)(*(longlong*)(*(longlong*)(CameraBehavior + 0x7c) + 0x718) + 0x10a8) + 0x68) + 0x104);
+    if (lVar1 != 0) {
+      iVar2 = *(int*)(*(longlong*)(lVar1 + 0x28) + 0x9c);
+      if (iVar2 == 3 || iVar2 == 4) return;
+    }
+    ```
+    Only `actionType == 3` (interactive minigame: lockpick, peephole) or `actionType == 4` (interactive puzzle: safe cracking) indicate minigame lock.
+  - Furthermore, `GetFNameWide` was passing `uint64_t` by value into `FName_ToString` (`0x1400E4EB0`) instead of `const FName*` in `RCX`, which was corrected to pass `const FName*`.
+  - Removed unaligned 64-bit read of `ViewTarget.Target` at `+0x48C`.
+
+### 2. Root Cause Analysis: Head Missing Except Eyes/Mask, No Torso in 3P, Missing Hands in 1P
+- **Decompilation Findings**:
+  - `hero->HiddenMaterialSections` (`hero + 0x15A8`) contains only a small subset of section indices (2-3 sections).
+  - Calling only `AThiefPawn_Hero_ToggleMaterialSections` left the remaining material sections on `hero->Mesh` (head/hood) and all sections on `hero->Mesh2` (+0x14A8, torso and arms) hidden!
+  - In 3rd person:
+    - We must iterate and show all sections on `hero->Mesh` (`skelMesh + 0x84`), `hero->Mesh2` (`skel2 + 0x84`), and `hero->Mesh3` (`skel3 + 0x84`).
+    - We must unhide all bones on `hero->Mesh` skeleton (`skel + 0x44`).
+    - We unhide all attached accessories (`hero->Mesh->Attachments` and `hero + 0x1490 + c*8`).
+  - In 1st person:
+    - We hide head/neck bones on `hero->Mesh` and sections in `HiddenMaterialSections`.
+    - We hide all attached components on head sockets (`Head`, `Face`, `Mask`, `Eyes`, `Cowl`, `Hood`, `SocketName`).
+    - We ensure `hero->Mesh2` (1P arms/hands) is explicitly unhidden and shown with `SetHidden(0)` and section iteration so Garrett's hands and tools are always visible.
+  - Startup / Spawn Tracking:
+    - Added `s_bInitialApplied` and `s_pLastHero` to ensure `UpdateHeroMeshVisibility` executes as soon as the hero pawn finishes spawning, avoiding missed transitions during level load.
+
+### 3. Verification & Deployment Status
+- **Binary Rebuilt**: `dinput8.dll` compiled cleanly with Clang 22 (Wine MinGW-w64).
+- **Deployed Target**: `/home/jackedhawk117/Games/Heroic/ThiefvWwV2/Binaries/Win64/dinput8.dll`.
+
 
 
 

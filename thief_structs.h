@@ -312,6 +312,6 @@ namespace ThiefSignatures
     using tTraceCameraProbe = void(*)(void* CameraBehavior, float DeltaTime, FVector* OutCameraLocation);
     using tUpdateCameraCollision = void(*)(void* CameraBehavior, float DeltaTime, FVector* OutCameraLocation);
     using tTraceCameraDistance = float(*)(UThiefCameraBehavior* thisBehavior, const FVector& TargetLocation, const FVector& Direction, float DesiredDistance);
-    using tFName_ToString = void(*)(uint64_t NameVal, FString* OutStr);
+    using tFName_ToString = void(*)(const FName* thisName, FString* OutStr);
     using tAppFree = void(*)(void* Ptr);
 }
