@@ -189,48 +189,37 @@ static AThiefPawn_Hero* GetHeroPawn(APlayerController* Controller)
     return nullptr;
 }
 
-// Helper function to resolve string for an FName index from GNames table
-static const char* GetFNameString(int32_t nameIndex, char* outBuf, size_t maxLen)
+// Helper function to resolve wide string for an FName via native FName_ToString
+static bool GetFNameWide(FName name, wchar_t* outBuf, size_t maxChars)
 {
-    if (nameIndex < 0 || !outBuf || maxLen == 0)
-        return "";
+    if (name.Index <= 0 || !outBuf || maxChars == 0)
+        return false;
 
-    outBuf[0] = '\0';
-    uintptr_t namesTable = *(uintptr_t*)RESOLVE_ADDR(ThiefGlobals::GNames);
-    if (!namesTable || !IsValidReadPtr((void*)namesTable, 0x1000))
-        return "";
+    outBuf[0] = L'\0';
+    auto pToString = (ThiefSignatures::tFName_ToString)RESOLVE_ADDR(ThiefFunctions::FName_ToString);
+    auto pFree = (ThiefSignatures::tAppFree)RESOLVE_ADDR(ThiefFunctions::appFree);
 
-    uintptr_t pEntry = *(uintptr_t*)(namesTable + ((uintptr_t)nameIndex * sizeof(uintptr_t)));
-    if (!pEntry || !IsValidReadPtr((void*)pEntry, 0x30))
-        return "";
+    if (!pToString)
+        return false;
 
-    uint32_t flags = *(uint32_t*)(pEntry + 0x08);
-    if ((flags & 1) == 0) // ASCII string
+    FString str = { nullptr, 0, 0 };
+    uint64_t nameVal = *(uint64_t*)&name;
+    pToString(nameVal, &str);
+
+    bool bSuccess = false;
+    if (str.Data && str.Num > 0)
     {
-        const char* str = (const char*)(pEntry + 0x14);
-        if (IsValidReadPtr(str, 16))
-        {
-            strncpy(outBuf, str, maxLen - 1);
-            outBuf[maxLen - 1] = '\0';
-            return outBuf;
-        }
+        wcsncpy(outBuf, str.Data, maxChars - 1);
+        outBuf[maxChars - 1] = L'\0';
+        bSuccess = true;
     }
-    else // Wide string
+
+    if (str.Data && pFree)
     {
-        const wchar_t* wstr = (const wchar_t*)(pEntry + 0x14);
-        if (IsValidReadPtr(wstr, 32))
-        {
-            size_t i = 0;
-            while (i < maxLen - 1 && wstr[i] != 0)
-            {
-                outBuf[i] = (char)wstr[i];
-                i++;
-            }
-            outBuf[i] = '\0';
-            return outBuf;
-        }
+        pFree(str.Data);
     }
-    return "";
+
+    return bSuccess;
 }
 
 // Check if player is currently in a minigame, interaction, bow aiming, or cutscene
@@ -239,48 +228,66 @@ static bool IsMinigameOrCutsceneActive(APlayerController* Controller, AThiefPawn
     if (!Controller || !IsValidReadPtr(Controller, 0x480))
         return false;
 
-    // Signal A: ViewTarget is an external object / minigame target (not Garrett)
+    // Signal A: Garrett Action/Interaction state (native check used by Eidos camera collision at 0x140C072F0)
+    if (hero && IsValidReadPtr(hero, 0x1100))
+    {
+        uintptr_t p10a8 = *(uintptr_t*)((uintptr_t)hero + 0x10A8);
+        if (p10a8 && IsValidReadPtr((void*)p10a8, 0x70))
+        {
+            uintptr_t p68 = *(uintptr_t*)(p10a8 + 0x68);
+            if (p68 && IsValidReadPtr((void*)p68, 0x110))
+            {
+                uintptr_t pAction = *(uintptr_t*)(p68 + 0x104);
+                if (pAction && IsValidReadPtr((void*)pAction, 0x30))
+                {
+                    // Non-null action indicates Garrett is lockpicking, searching, cracking safe, in peephole, or takedown!
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Signal B: ViewTarget is an external object / minigame target (not Garrett)
     if (Controller->ViewTarget.Target && (AActor*)Controller->ViewTarget.Target != (AActor*)hero)
     {
         return true;
     }
 
-    // Signal B: Check Camera's ActiveBehavior
+    // Signal C: Check Camera's ActiveBehavior and FOV
     uintptr_t cam = *(uintptr_t*)((uintptr_t)Controller + 0x450);
     if (cam && IsValidReadPtr((void*)cam, 0xC00))
     {
+        AThiefCamera* pCam = (AThiefCamera*)cam;
+        // If camera FOV is significantly zoomed in (e.g. lockpicking, bow aiming), keep in 1P!
+        if (pCam->POV.FOV > 0.0f && pCam->POV.FOV < 60.0f)
+        {
+            return true;
+        }
+
         uintptr_t behavior = *(uintptr_t*)(cam + 0xB68);
         if (behavior && IsValidReadPtr((void*)behavior, 0x300))
         {
-            // Check behavior class name
             uintptr_t pClass = *(uintptr_t*)(behavior + 0x50);
             if (pClass && IsValidReadPtr((void*)pClass, 0x60))
             {
-                int32_t nameIdx = *(int32_t*)(pClass + 0x48);
-                char nameBuf[128];
-                const char* className = GetFNameString(nameIdx, nameBuf, sizeof(nameBuf));
-                if (className && className[0] != '\0')
+                FName className = *(FName*)(pClass + 0x48);
+                wchar_t nameBuf[128];
+                if (GetFNameWide(className, nameBuf, 128))
                 {
-                    // Minigames and special states that force native first person:
-                    // - Lockpicking: UThiefCameraLockpick
-                    // - Bow Aiming: UThiefCameraMarksman / MarksmanAim
-                    // - Keyholes / Peepholes / Crawlspaces: UThiefCameraSmartObjectDriven
-                    // - Safe Cracking / Keypads: UThiefCameraSafe
-                    // - Cutscenes / Takedowns: UThiefCameraCinematic*
-                    if (strstr(className, "Lockpick") ||
-                        strstr(className, "Marksman") ||
-                        strstr(className, "SmartObject") ||
-                        strstr(className, "Cinematic") ||
-                        strstr(className, "Cineser") ||
-                        strstr(className, "SecondPerson") ||
-                        strstr(className, "Safe") ||
-                        strstr(className, "Keypad") ||
-                        strstr(className, "Takedown") ||
-                        strstr(className, "Aim") ||
-                        strstr(className, "MiniGame") ||
-                        strstr(className, "Minigame") ||
-                        strstr(className, "Peephole") ||
-                        strstr(className, "Keyhole"))
+                    if (wcsstr(nameBuf, L"Lockpick") ||
+                        wcsstr(nameBuf, L"Marksman") ||
+                        wcsstr(nameBuf, L"SmartObject") ||
+                        wcsstr(nameBuf, L"Cinematic") ||
+                        wcsstr(nameBuf, L"Cineser") ||
+                        wcsstr(nameBuf, L"SecondPerson") ||
+                        wcsstr(nameBuf, L"Safe") ||
+                        wcsstr(nameBuf, L"Keypad") ||
+                        wcsstr(nameBuf, L"Takedown") ||
+                        wcsstr(nameBuf, L"Aim") ||
+                        wcsstr(nameBuf, L"MiniGame") ||
+                        wcsstr(nameBuf, L"Minigame") ||
+                        wcsstr(nameBuf, L"Peephole") ||
+                        wcsstr(nameBuf, L"Keyhole"))
                     {
                         return true;
                     }
@@ -303,22 +310,21 @@ static void UpdateHeroMeshVisibility(APlayerController* Controller, bool bThirdP
     if (!mesh || !IsValidReadPtr(mesh, 0x700))
         return;
 
-    uintptr_t skelMesh = *(uintptr_t*)((uintptr_t)mesh + 0x2D0);
-    if (!skelMesh || !IsValidReadPtr((void*)skelMesh, 0x90))
-        return;
-
     auto pShowHero = (ThiefSignatures::tShowThirdPersonMesh)RESOLVE_ADDR(ThiefFunctions::AThiefPawn_Hero_ShowThirdPersonMesh);
     auto pHideHero = (ThiefSignatures::tHideThirdPersonMesh)RESOLVE_ADDR(ThiefFunctions::AThiefPawn_Hero_HideThirdPersonMesh);
-    auto pShowAll = (ThiefSignatures::tShowAllMaterialSections)RESOLVE_ADDR(ThiefFunctions::AThiefPawn_Hero_ShowAllMaterialSections);
-    auto pShowSection = (ThiefSignatures::tShowMaterialSection)RESOLVE_ADDR(ThiefFunctions::USkeletalMeshComponent_ShowMaterialSection);
-    auto pSetSectionHidden = (ThiefSignatures::tSetMaterialSectionHidden)RESOLVE_ADDR(ThiefFunctions::USkeletalMeshComponent_SetMaterialSectionHidden);
     auto pToggleSections = (ThiefSignatures::tToggleMaterialSections)RESOLVE_ADDR(ThiefFunctions::AThiefPawn_Hero_ToggleMaterialSections);
     auto pSetHideBone = (ThiefSignatures::tHideBone)RESOLVE_ADDR(ThiefFunctions::USkeletalMeshComponent_HideBone);
 
     uintptr_t mesh2 = *(uintptr_t*)((uintptr_t)hero + 0x14A8);
     uintptr_t mesh3 = *(uintptr_t*)((uintptr_t)hero + 0x14B0);
 
-    static bool s_bLoggedUnhide = false;
+    // Get total bone count on primary mesh skeleton
+    int32_t totalBones = 0;
+    uintptr_t skel = *(uintptr_t*)((uintptr_t)mesh + 0x32C);
+    if (skel && IsValidReadPtr((void*)skel, 0x50))
+    {
+        totalBones = *(int32_t*)(skel + 0x44);
+    }
 
     if (bThirdPerson)
     {
@@ -329,94 +335,67 @@ static void UpdateHeroMeshVisibility(APlayerController* Controller, bool bThirdP
         // 2. Clear bHidden bit on primary mesh (+0x158)
         *(uint32_t*)((uintptr_t)mesh + 0x158) &= ~0x00400000;
 
-        // 3. Engine master reset: show all sections & unhide all bones on primary mesh
+        // 3. Engine master unhide
         if (pShowHero)
         {
             pShowHero(hero);
         }
-        else if (pShowAll)
-        {
-            pShowAll(hero);
-        }
 
-        // 4. Explicitly unhide all bones in hero->HiddenBoneIndices (head/neck)
-        int32_t boneCount = hero->HiddenBoneIndices.Num;
-        int32_t* pBones = hero->HiddenBoneIndices.Data;
-        if (pSetHideBone && pBones && boneCount > 0 && boneCount < 128 && IsValidReadPtr(pBones, boneCount * sizeof(int32_t)))
+        // 4. UNHIDE ALL BONES on primary mesh so head, neck, face, and hood are 100% visible!
+        if (pSetHideBone && totalBones > 0)
         {
-            for (int i = 0; i < boneCount; ++i)
+            for (int32_t b = 0; b < totalBones && b < 256; ++b)
             {
-                pSetHideBone(mesh, pBones[i], 0, 1, 1); // bHide = 0
+                pSetHideBone(mesh, b, 0, 1, 1); // bHide = 0
             }
         }
 
-        // 5. Explicitly unhide hood/face material sections in hero->HiddenMaterialSections
+        // 5. Unhide hood/face material sections
         if (pToggleSections)
         {
             pToggleSections(hero, (void*)((uintptr_t)hero + 0x15A8), 0); // bHide = 0
         }
 
-        // 6. Ensure all material sections on primary mesh are shown
-        int32_t secCount1 = *(int32_t*)(skelMesh + 0x84);
-        for (int s = 0; s < secCount1 && s < 32; ++s)
+        // 6. Unhide and show all attached gear/accessory components on Garrett
+        int32_t attachCount = *(int32_t*)((uintptr_t)mesh + 0x454);
+        uintptr_t pAttachments = *(uintptr_t*)((uintptr_t)mesh + 0x44C);
+        if (pAttachments && attachCount > 0 && attachCount < 64 && IsValidReadPtr((void*)pAttachments, attachCount * 0x34))
         {
-            if (pShowSection) pShowSection(mesh, 0, s, 1, 1, 1);
-            if (pSetSectionHidden) pSetSectionHidden(mesh, 0, s, 0);
-        }
-
-        // 7. Unhide and show all sections on Mesh2 (+0x14A8, torso/body)
-        int32_t secCount2 = 0;
-        if (mesh2 && IsValidReadPtr((void*)mesh2, 0x300))
-        {
-            *(uint32_t*)(mesh2 + 0x158) &= ~0x00400000;
-            uintptr_t skel2 = *(uintptr_t*)(mesh2 + 0x2D0);
-            if (skel2 && IsValidReadPtr((void*)skel2, 0x90))
+            for (int32_t a = 0; a < attachCount; ++a)
             {
-                secCount2 = *(int32_t*)(skel2 + 0x84);
-                for (int s = 0; s < secCount2 && s < 32; ++s)
+                uintptr_t comp = *(uintptr_t*)(pAttachments + a * 0x34);
+                if (comp && IsValidReadPtr((void*)comp, 0x160))
                 {
-                    if (pShowSection) pShowSection((USkeletalMeshComponent*)mesh2, 0, s, 1, 1, 1);
-                    if (pSetSectionHidden) pSetSectionHidden((USkeletalMeshComponent*)mesh2, 0, s, 0);
+                    *(uint32_t*)(comp + 0x158) &= ~0x00400000; // clear bHidden
+                    void** vtbl = *(void***)comp;
+                    if (vtbl && IsValidReadPtr(vtbl, 0x510))
+                    {
+                        typedef void(*tSetHidden)(void*, uint32_t);
+                        tSetHidden setHidden = (tSetHidden)vtbl[0x508 / 8];
+                        if (setHidden) setHidden((void*)comp, 0); // show
+                    }
                 }
             }
         }
 
-        // 8. Unhide and show Mesh3 (+0x14B0, head accessory / quiver)
-        int32_t secCount3 = 0;
-        if (mesh3 && IsValidReadPtr((void*)mesh3, 0x300))
+        // Also ensure components +0x1498 to +0x14F8 are visible (except 1P arms)
+        for (int c = 1; c < 14; ++c)
         {
-            *(uint32_t*)(mesh3 + 0x158) &= ~0x00400000;
-            uintptr_t skel3 = *(uintptr_t*)(mesh3 + 0x2D0);
-            if (skel3 && IsValidReadPtr((void*)skel3, 0x90))
+            uintptr_t comp = *(uintptr_t*)((uintptr_t)hero + 0x1490 + c * 8);
+            if (comp && comp != mesh2 && IsValidReadPtr((void*)comp, 0x160))
             {
-                secCount3 = *(int32_t*)(skel3 + 0x84);
-                for (int s = 0; s < secCount3 && s < 32; ++s)
+                *(uint32_t*)(comp + 0x158) &= ~0x00400000;
+                void** vtbl = *(void***)comp;
+                if (vtbl && IsValidReadPtr(vtbl, 0x510))
                 {
-                    if (pShowSection) pShowSection((USkeletalMeshComponent*)mesh3, 0, s, 1, 1, 1);
-                    if (pSetSectionHidden) pSetSectionHidden((USkeletalMeshComponent*)mesh3, 0, s, 0);
+                    typedef void(*tSetHidden)(void*, uint32_t);
+                    tSetHidden setHidden = (tSetHidden)vtbl[0x508 / 8];
+                    if (setHidden) setHidden((void*)comp, 0);
                 }
             }
-
-            // Call SetHidden(0) via vtable +0x508 on Mesh3
-            void** vtbl = *(void***)mesh3;
-            if (vtbl && IsValidReadPtr(vtbl, 0x510))
-            {
-                typedef void(*tSetHidden)(void*, uint32_t);
-                tSetHidden setHidden = (tSetHidden)vtbl[0x508 / 8];
-                if (setHidden) setHidden((void*)mesh3, 0);
-            }
         }
 
-        if (!s_bLoggedUnhide)
-        {
-            char diag[256];
-            uint32_t stateFlags = *(uint32_t*)((uintptr_t)hero + 0x10D8);
-            wsprintfA(diag, "[MeshDiag] Hero=%p Flags=0x%x Mesh=%p(Sec=%d) Mesh2=%p(Sec=%d) Mesh3=%p(Sec=%d)",
-                hero, stateFlags, mesh, secCount1, (void*)mesh2, secCount2, (void*)mesh3, secCount3);
-            ModLog(diag);
-            ModLog("[CameraMod] Garrett full third-person body, torso, and head unhidden");
-            s_bLoggedUnhide = true;
-        }
+        ModLog("[CameraMod] Garrett full third-person body, torso, hood, eyes, and head unhidden");
     }
     else
     {
@@ -441,7 +420,9 @@ static void UpdateHeroMeshVisibility(APlayerController* Controller, bool bThirdP
                 pSetHideBone(mesh, pBones[i], 1, 1, 1); // bHide = 1
             }
         }
-        else if (Controller->PlayerCamera && pSetHideBone)
+        
+        // Always hide cached HeadBoneIndex (and descendants)
+        if (Controller->PlayerCamera && pSetHideBone)
         {
             int32_t headIdx = Controller->PlayerCamera->HeadBoneIndex;
             if (headIdx >= 0)
@@ -456,8 +437,50 @@ static void UpdateHeroMeshVisibility(APlayerController* Controller, bool bThirdP
             pToggleSections(hero, (void*)((uintptr_t)hero + 0x15A8), 1); // bHide = 1
         }
 
-        // 3. Hide Mesh3 (head accessory / quiver)
-        if (mesh3 && IsValidReadPtr((void*)mesh3, 0x300))
+        // 3. Hide ALL head-attached gear and accessories (eyes, mask, hood accessory, quiver)
+        int32_t attachCount = *(int32_t*)((uintptr_t)mesh + 0x454);
+        uintptr_t pAttachments = *(uintptr_t*)((uintptr_t)mesh + 0x44C);
+        if (pAttachments && attachCount > 0 && attachCount < 64 && IsValidReadPtr((void*)pAttachments, attachCount * 0x34))
+        {
+            for (int32_t a = 0; a < attachCount; ++a)
+            {
+                uintptr_t comp = *(uintptr_t*)(pAttachments + a * 0x34);
+                FName socket = *(FName*)(pAttachments + a * 0x34 + 0x08);
+                if (comp && IsValidReadPtr((void*)comp, 0x160))
+                {
+                    wchar_t sockName[64];
+                    bool bIsHeadAttachment = false;
+                    if (GetFNameWide(socket, sockName, 64))
+                    {
+                        if (wcsstr(sockName, L"Head") || wcsstr(sockName, L"head") ||
+                            wcsstr(sockName, L"Neck") || wcsstr(sockName, L"Face") ||
+                            wcsstr(sockName, L"Mask") || wcsstr(sockName, L"Eyes"))
+                        {
+                            bIsHeadAttachment = true;
+                        }
+                    }
+                    if (socket.Index == hero->SocketName.Index || comp == mesh3)
+                    {
+                        bIsHeadAttachment = true;
+                    }
+
+                    if (bIsHeadAttachment)
+                    {
+                        *(uint32_t*)(comp + 0x158) |= 0x00400000; // set bHidden
+                        void** vtbl = *(void***)comp;
+                        if (vtbl && IsValidReadPtr(vtbl, 0x510))
+                        {
+                            typedef void(*tSetHidden)(void*, uint32_t);
+                            tSetHidden setHidden = (tSetHidden)vtbl[0x508 / 8];
+                            if (setHidden) setHidden((void*)comp, 1); // hide
+                        }
+                    }
+                }
+            }
+        }
+
+        // Explicitly ensure Mesh3 is hidden
+        if (mesh3 && IsValidReadPtr((void*)mesh3, 0x160))
         {
             *(uint32_t*)(mesh3 + 0x158) |= 0x00400000;
             void** vtbl = *(void***)mesh3;
@@ -469,14 +492,21 @@ static void UpdateHeroMeshVisibility(APlayerController* Controller, bool bThirdP
             }
         }
 
-        // 4. Ensure primary mesh and Mesh2 (hands/arms) remain visible for 1st-person gameplay
+        // 4. Ensure primary mesh (body/legs) and Mesh2 (hands/arms) remain visible for 1st-person gameplay
         *(uint32_t*)((uintptr_t)mesh + 0x158) &= ~0x00400000;
         if (mesh2 && IsValidReadPtr((void*)mesh2, 0x300))
         {
             *(uint32_t*)(mesh2 + 0x158) &= ~0x00400000;
+            void** vtbl = *(void***)mesh2;
+            if (vtbl && IsValidReadPtr(vtbl, 0x510))
+            {
+                typedef void(*tSetHidden)(void*, uint32_t);
+                tSetHidden setHidden = (tSetHidden)vtbl[0x508 / 8];
+                if (setHidden) setHidden((void*)mesh2, 0);
+            }
         }
 
-        s_bLoggedUnhide = false;
+        ModLog("[CameraMod] Restored 1st-person: Head and mask hidden, hands and body visible");
     }
 }
 
@@ -507,8 +537,8 @@ extern "C" void Hook_GetPlayerViewPoint(APlayerController* Controller, FVector* 
     bool bInMinigame = IsMinigameOrCutsceneActive(Controller, hero);
     bool bEffective3P = g_Config.bEnabled && !bInMinigame;
 
-    // 3. Update character model visibility
-    if (s_LastModState != bEffective3P || (++s_MeshFrameCounter % 15 == 0))
+    // 3. Update character model visibility ONLY on actual state change!
+    if (s_LastModState != bEffective3P)
     {
         UpdateHeroMeshVisibility(Controller, bEffective3P);
         s_LastModState = bEffective3P;
@@ -598,30 +628,22 @@ extern "C" void Hook_GetPlayerViewPoint(APlayerController* Controller, FVector* 
     finalCamPos.Z = pivot.Z - (forward.Z * g_CurrentCameraDistance);
 
     // 8. Near-proximity occlusion: fade/hide meshes when camera pulls too close to head
+    // Uses hysteresis to prevent boundary flickering
+    static bool s_bProximityHidden = false;
     if (hero)
     {
         USkeletalMeshComponent* primaryMesh = *(USkeletalMeshComponent**)((uintptr_t)hero + 0x444);
-        uintptr_t mesh3 = *(uintptr_t*)((uintptr_t)hero + 0x14B0);
-        if (g_CurrentCameraDistance < 20.0f)
+        if (g_CurrentCameraDistance < 15.0f && !s_bProximityHidden)
         {
             if (primaryMesh && IsValidReadPtr(primaryMesh, 0x160))
                 *(uint32_t*)((uintptr_t)primaryMesh + 0x158) |= 0x00400000;
+            s_bProximityHidden = true;
         }
-        else
+        else if (g_CurrentCameraDistance > 25.0f && s_bProximityHidden)
         {
             if (primaryMesh && IsValidReadPtr(primaryMesh, 0x160))
                 *(uint32_t*)((uintptr_t)primaryMesh + 0x158) &= ~0x00400000;
-        }
-
-        if (g_CurrentCameraDistance < 35.0f)
-        {
-            if (mesh3 && IsValidReadPtr((void*)mesh3, 0x160))
-                *(uint32_t*)(mesh3 + 0x158) |= 0x00400000;
-        }
-        else
-        {
-            if (mesh3 && IsValidReadPtr((void*)mesh3, 0x160))
-                *(uint32_t*)(mesh3 + 0x158) &= ~0x00400000;
+            s_bProximityHidden = false;
         }
     }
 

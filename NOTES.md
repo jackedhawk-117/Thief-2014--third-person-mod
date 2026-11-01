@@ -380,7 +380,38 @@ Eidos Montréal created an extensive hierarchy of `UThiefCameraBehavior` subclas
 
 ---
 
-## Phase 12: Implementation & Deployment of Fixes for All Three Issues
+## Phase 13: Refinement & Defect Resolution (Full Head Rendering, Flickering Elimination, Minigame Lockpick Zoom)
+
+### 1. Root Cause Analysis: Head Incompleteness & First-Person Obstruction
+- **Observation**: In third person, only Garrett's eyes and face mask portion were rendered, with the rest of his head/cowl missing. In first person, the eyes and mask remained rendered directly in front of the camera, obstructing the view.
+- **Decompilation Findings**:
+  - Garrett is composed of multiple components: the primary skeleton `hero->Mesh` (+0x444) plus up to 14 attached gear/accessory components (`hero->Mesh->Attachments` at `+0x44C`, count at `+0x454`, and direct pointers at `hero + 0x1490 + uVar * 8`).
+  - The cowl, eyes mask, and facial accessories are separate attached components mounted on head sockets (`Head`, `Bone-Head`, `hero->SocketName` at `+0x1538`).
+  - In third person, `hero->Mesh` previously retained hidden bone states from first person because `hero->HiddenBoneIndices.Num` is often zero or uninitialized at load time, leaving `HeadBoneIndex` hidden on the primary mesh.
+  - In first person, only bones on `hero->Mesh` were being hidden; the attached head accessories (eyes/mask) were never hidden, leaving them hovering in front of the camera.
+- **Fix**:
+  - **3rd Person**: Loop over all `totalBones` (`*(int32_t*)(skel + 0x44)`) on `hero->Mesh` and unhide every bone (`pSetHideBone(mesh, b, 0, 1, 1)`). Iterate through all `hero->Mesh->Attachments` and gear components `+0x1498` to `+0x14F8`, clearing `bHidden` and calling `SetHidden(0)` so Garrett's complete head, hood, cowl, mask, eyes, and torso render fully.
+  - **1st Person**: In addition to hiding `cam->HeadBoneIndex` on `hero->Mesh`, iterate through `hero->Mesh->Attachments` and hide all components attached to sockets containing `Head`, `head`, `Neck`, `Face`, `Mask`, `Eyes`, or `hero->SocketName` (+0x1538). This completely eliminates the eyes/mask floating obstruction while keeping `Mesh2` (1P arms/hands) fully visible.
+
+### 2. Root Cause Analysis: Character Model Flickering
+- **Observation**: Character model repeatedly flickered while walking or standing in third person.
+- **Root Cause**:
+  - `UpdateHeroMeshVisibility` was being invoked every 15 frames (`++s_MeshFrameCounter % 15 == 0`). Each invocation called `ShowThirdPersonMesh`, re-attaching components (`FUN_1404a96c0`) and toggling section visibility multiple times per second.
+  - Near-proximity occlusion also lacked hysteresis, causing rapid toggling across boundary thresholds.
+- **Fix**:
+  - Removed periodic execution: `UpdateHeroMeshVisibility` is now strictly triggered on state transition (`s_LastModState != bEffective3P`).
+  - Added hysteresis to near-proximity occlusion (`< 15.0f` to hide, `> 25.0f` to unhide).
+
+### 3. Root Cause Analysis: Lockpicking Zoom Failure
+- **Observation**: Lockpicking did not zoom in.
+- **Root Cause**:
+  - `Shipping-ThiefGame.exe` utilizes Huffman/dictionary compressed strings in `GNames` (flag bit `0x2` set). The mod's manual string reader failed to decompress names, returning empty strings and causing `IsMinigameOrCutsceneActive` to evaluate to `false`.
+  - Because `bInMinigame` was false, the mod continued applying the 180 uu 3rd-person camera offset over the lockpicking camera, cancelling the zoom.
+- **Fix**:
+  - Integrated native `FName_ToString` (`0x1400E4EB0`) with `appFree` (`0x14005DD20`) to decode both compressed and uncompressed FNames with 100% fidelity.
+  - Added native interaction check from `UThiefCamera_UpdateCameraCollision` (`0x140C072F0`): `hero + 0x10A8 -> +0x68 -> +0x104` (`pAction`). If non-null, lockpicking / interaction is active.
+  - Added camera FOV check: if `cam->POV.FOV < 60.0f` (active zoom), automatically bypass camera offset and maintain first person.
+
 
 ### 1. Issue 1 Fix: Camera Collision & Wall-Clipping Prevention
 - **Implementation**:

@@ -53,6 +53,13 @@ struct TArray
     int32_t Max;
 };
 
+struct FString
+{
+    wchar_t* Data;
+    int32_t Num;
+    int32_t Max;
+};
+
 class AActor;
 class UPrimitiveComponent;
 
@@ -268,6 +275,8 @@ namespace ThiefFunctions
     constexpr uintptr_t UThiefCamera_UpdateCameraCollision = 0x140C072F0;
     constexpr uintptr_t UThiefCamera_TraceCameraDistance = 0x140C104B0;
     constexpr uintptr_t FName_ToString = 0x1400E4EB0;
+    constexpr uintptr_t appFree = 0x14005DD20;
+    constexpr uintptr_t appMalloc = 0x14005DCD0;
 
     // Mesh Visibility & Character Pipeline
     constexpr uintptr_t AThiefPawn_Hero_ShowThirdPersonMesh = 0x140B3B850;
@@ -303,4 +312,6 @@ namespace ThiefSignatures
     using tTraceCameraProbe = void(*)(void* CameraBehavior, float DeltaTime, FVector* OutCameraLocation);
     using tUpdateCameraCollision = void(*)(void* CameraBehavior, float DeltaTime, FVector* OutCameraLocation);
     using tTraceCameraDistance = float(*)(UThiefCameraBehavior* thisBehavior, const FVector& TargetLocation, const FVector& Direction, float DesiredDistance);
+    using tFName_ToString = void(*)(uint64_t NameVal, FString* OutStr);
+    using tAppFree = void(*)(void* Ptr);
 }
