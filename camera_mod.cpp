@@ -193,15 +193,23 @@ static AThiefPawn_Hero* GetHeroPawn(APlayerController* Controller)
 // Helper function to resolve string for an FName index from GNames table
 static const char* GetFNameString(int32_t nameIndex, char* outBuf, size_t maxLen)
 {
-    if (nameIndex < 0 || !outBuf || maxLen == 0)
+    if (nameIndex < 0 || nameIndex > 2000000 || !outBuf || maxLen == 0)
         return "";
 
     outBuf[0] = '\0';
-    uintptr_t namesTable = *(uintptr_t*)RESOLVE_ADDR(ThiefGlobals::GNames);
+    uintptr_t pGNames = (uintptr_t)RESOLVE_ADDR(ThiefGlobals::GNames);
+    if (!pGNames || !IsValidReadPtr((void*)pGNames, sizeof(uintptr_t)))
+        return "";
+
+    uintptr_t namesTable = *(uintptr_t*)pGNames;
     if (!namesTable || !IsValidReadPtr((void*)namesTable, 0x1000))
         return "";
 
-    uintptr_t pEntry = *(uintptr_t*)(namesTable + ((uintptr_t)nameIndex * sizeof(uintptr_t)));
+    uintptr_t pEntryAddr = namesTable + ((uintptr_t)nameIndex * sizeof(uintptr_t));
+    if (!IsValidReadPtr((void*)pEntryAddr, sizeof(uintptr_t)))
+        return "";
+
+    uintptr_t pEntry = *(uintptr_t*)pEntryAddr;
     if (!pEntry || !IsValidReadPtr((void*)pEntry, 0x30))
         return "";
 
@@ -502,6 +510,29 @@ extern "C" void Hook_GetPlayerViewPoint(APlayerController* Controller, FVector* 
     }
 
     AThiefPawn_Hero* hero = GetHeroPawn(Controller);
+
+    // If hero is null, or in main menu / loading screen:
+    // DO NOT touch camera or call engine functions! Let native engine run untouched.
+    if (!hero || !IsValidReadPtr(hero, 0x1600))
+    {
+        g_bFirstFrameAfterToggle = true;
+        return;
+    }
+
+    USkeletalMeshComponent* primaryMesh = *(USkeletalMeshComponent**)((uintptr_t)hero + 0x444);
+    if (!primaryMesh || !IsValidReadPtr(primaryMesh, 0x700))
+    {
+        g_bFirstFrameAfterToggle = true;
+        return;
+    }
+
+    uintptr_t skelMesh = *(uintptr_t*)((uintptr_t)primaryMesh + 0x2D0);
+    if (!skelMesh || !IsValidReadPtr((void*)skelMesh, 0x90))
+    {
+        g_bFirstFrameAfterToggle = true;
+        return;
+    }
+
     bool bInTakedown = IsTakedownActive(Controller, hero);
 
     static bool s_bTakedownLogged = false;
