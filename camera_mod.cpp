@@ -650,10 +650,10 @@ extern "C" void Hook_GetPlayerViewPoint(APlayerController* Controller, FVector* 
 // Background thread for asynchronous hotkey handling
 static DWORD WINAPI InputThreadProc(LPVOID lpParam)
 {
-    ModLog("[CameraMod] Input listener thread started");
+    ModLog("[CameraMod] Input listener thread started (F4: Toggle 3P/1P, F3: Shoulder Switch)");
 
     bool bLastToggleState = false;
-    bool bLastF5State = false;
+    bool bLastF3State = false;
     bool bLastNumPad0State = false;
     bool bLastPageUpState = false;
     bool bLastPageDownState = false;
@@ -666,20 +666,21 @@ static DWORD WINAPI InputThreadProc(LPVOID lpParam)
     {
         Sleep(20);
 
-        // F4: Toggle 1st / 3rd person perspective
-        bool bToggleDown = (GetAsyncKeyState(g_Config.ToggleKey) & 0x8000) != 0;
+        // F4: Toggle 1st / 3rd person perspective (prevent Alt+F4 exit from triggering toggle)
+        bool bAltDown = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+        bool bToggleDown = !bAltDown && ((GetAsyncKeyState(g_Config.ToggleKey) & 0x8000) != 0);
         if (bToggleDown && !bLastToggleState)
         {
             g_Config.bEnabled = !g_Config.bEnabled;
             g_bFirstFrameAfterToggle = true;
             g_CurrentCameraDistance = g_Config.Distance;
-            ModLog(g_Config.bEnabled ? "[CameraMod] Switched to 3rd Person View" : "[CameraMod] Switched to 1st Person View");
+            ModLog(g_Config.bEnabled ? "[CameraMod] Switched to 3rd Person View (F4)" : "[CameraMod] Switched to 1st Person View (F4)");
         }
         bLastToggleState = bToggleDown;
 
-        // F5: Switch shoulder (Left / Center / Right)
-        bool bF5Down = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
-        if (bF5Down && !bLastF5State)
+        // F3: Switch shoulder (Left / Center / Right) - avoids conflicting with F5 QuickSave
+        bool bF3Down = (GetAsyncKeyState(VK_F3) & 0x8000) != 0;
+        if (bF3Down && !bLastF3State)
         {
             if (g_Config.ShoulderOffset > 10.0f)
                 g_Config.ShoulderOffset = -30.0f; // Switch to left shoulder
@@ -687,9 +688,9 @@ static DWORD WINAPI InputThreadProc(LPVOID lpParam)
                 g_Config.ShoulderOffset = 0.0f;   // Switch to center
             else
                 g_Config.ShoulderOffset = 30.0f;  // Switch to right shoulder
-            ModLog("[CameraMod] Shoulder toggled");
+            ModLog("[CameraMod] Shoulder toggled (F3)");
         }
-        bLastF5State = bF5Down;
+        bLastF3State = bF3Down;
 
         // NumPad 0: Reset camera to defaults
         bool bNumPad0Down = (GetAsyncKeyState(VK_NUMPAD0) & 0x8000) != 0;
@@ -771,9 +772,13 @@ static void LoadConfigFromIni()
             g_Config.ShoulderOffset = (float)atof(valBuf);
         if (GetPrivateProfileStringA("Camera", "SmoothFactor", "", valBuf, sizeof(valBuf), iniPath) > 0)
             g_Config.SmoothFactor = (float)atof(valBuf);
-        int toggleKey = GetPrivateProfileIntA("Camera", "ToggleKey", 0, iniPath);
-        if (toggleKey > 0)
-            g_Config.ToggleKey = toggleKey;
+        char keyBuf[32];
+        if (GetPrivateProfileStringA("Camera", "ToggleKey", "", keyBuf, sizeof(keyBuf), iniPath) > 0)
+        {
+            int key = (int)strtol(keyBuf, nullptr, 0);
+            if (key > 0)
+                g_Config.ToggleKey = key;
+        }
     }
 }
 
