@@ -234,19 +234,73 @@ static const char* GetFNameString(int32_t nameIndex, char* outBuf, size_t maxLen
     return "";
 }
 
+// Check if player is currently performing a stealth or combat takedown
+static bool IsTakedownActive(APlayerController* Controller, AThiefPawn_Hero* hero)
+{
+    // Check 1: Camera ActiveBehavior
+    if (Controller && IsValidReadPtr(Controller, 0x480))
+    {
+        uintptr_t cam = *(uintptr_t*)((uintptr_t)Controller + 0x450);
+        if (cam && IsValidReadPtr((void*)cam, 0xC00))
+        {
+            uintptr_t behavior = *(uintptr_t*)(cam + 0xB68);
+            if (behavior && IsValidReadPtr((void*)behavior, 0x300))
+            {
+                uintptr_t pClass = *(uintptr_t*)(behavior + 0x50);
+                if (pClass && IsValidReadPtr((void*)pClass, 0x60))
+                {
+                    int32_t nameIdx = *(int32_t*)(pClass + 0x48);
+                    char nameBuf[128];
+                    const char* className = GetFNameString(nameIdx, nameBuf, sizeof(nameBuf));
+                    if (className && className[0] != '\0')
+                    {
+                        if (strstr(className, "Takedown") || strstr(className, "takedown") || strstr(className, "SecondPerson"))
+                            return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Check 2: Hero ContextAction State
+    if (hero && IsValidReadPtr(hero, 0x1100))
+    {
+        uintptr_t p10a8 = *(uintptr_t*)((uintptr_t)hero + 0x10A8);
+        if (p10a8 && IsValidReadPtr((void*)p10a8, 0x70))
+        {
+            uintptr_t p68 = *(uintptr_t*)(p10a8 + 0x68);
+            if (p68 && IsValidReadPtr((void*)p68, 0x110))
+            {
+                uintptr_t pAction = *(uintptr_t*)(p68 + 0x108);
+                if (pAction && IsValidReadPtr((void*)pAction, 0x40))
+                {
+                    int32_t actIdx = *(int32_t*)(pAction + 0x10);
+                    char actBuf[128];
+                    const char* actName = GetFNameString(actIdx, actBuf, sizeof(actBuf));
+                    if (actName && actName[0] != '\0')
+                    {
+                        if (strstr(actName, "Takedown") || strstr(actName, "takedown") || strstr(actName, "TakeDown"))
+                            return true;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 // Check if player is currently in a minigame, interaction, bow aiming, or cutscene
 static bool IsMinigameOrCutsceneActive(APlayerController* Controller, AThiefPawn_Hero* hero)
 {
+    // Takedowns MUST remain in third-person!
+    if (IsTakedownActive(Controller, hero))
+        return false;
+
     if (!Controller || !IsValidReadPtr(Controller, 0x480))
         return false;
 
-    // Signal A: ViewTarget is an external object / minigame target (not Garrett)
-    if (Controller->ViewTarget.Target && (AActor*)Controller->ViewTarget.Target != (AActor*)hero)
-    {
-        return true;
-    }
-
-    // Signal B: Check Camera's ActiveBehavior
+    // Check Camera's ActiveBehavior
     uintptr_t cam = *(uintptr_t*)((uintptr_t)Controller + 0x450);
     if (cam && IsValidReadPtr((void*)cam, 0xC00))
     {
@@ -262,16 +316,20 @@ static bool IsMinigameOrCutsceneActive(APlayerController* Controller, AThiefPawn
                 const char* className = GetFNameString(nameIdx, nameBuf, sizeof(nameBuf));
                 if (className && className[0] != '\0')
                 {
+                    // Explicitly ignore takedowns or 3P behaviors
+                    if (strstr(className, "Takedown") || strstr(className, "takedown") || strstr(className, "SecondPerson"))
+                        return false;
+
+                    // Minigames and special states that force native first person:
+                    // - Lockpicking: UThiefCameraLockpick
+                    // - Bow Aiming: UThiefCameraMarksman / MarksmanAim
+                    // - Keyholes / Peepholes / Crawlspaces: UThiefCameraSmartObjectDriven
+                    // - Safe Cracking / Keypads: UThiefCameraSafe
                     if (strstr(className, "Lockpick") ||
                         strstr(className, "Marksman") ||
                         strstr(className, "SmartObject") ||
-                        strstr(className, "Cinematic") ||
-                        strstr(className, "Cineser") ||
-                        strstr(className, "SecondPerson") ||
                         strstr(className, "Safe") ||
                         strstr(className, "Keypad") ||
-                        strstr(className, "Takedown") ||
-                        strstr(className, "Aim") ||
                         strstr(className, "MiniGame") ||
                         strstr(className, "Minigame") ||
                         strstr(className, "Peephole") ||
@@ -446,11 +504,31 @@ extern "C" void Hook_GetPlayerViewPoint(APlayerController* Controller, FVector* 
     }
 
     AThiefPawn_Hero* hero = GetHeroPawn(Controller);
+    bool bInTakedown = IsTakedownActive(Controller, hero);
+
+    static bool s_bTakedownLogged = false;
+    if (bInTakedown)
+    {
+        if (!s_bTakedownLogged)
+        {
+            ModLog("[CameraMod] Stealth takedown animation started -> Rendering in 3rd Person");
+            s_bTakedownLogged = true;
+        }
+    }
+    else
+    {
+        if (s_bTakedownLogged)
+        {
+            ModLog("[CameraMod] Stealth takedown finished -> Resuming normal 3rd Person");
+            s_bTakedownLogged = false;
+        }
+    }
 
     // Minigame & Cutscene Guard:
-    // If player is lockpicking, aiming bow, using peephole/safe, or in cutscene:
+    // If player is lockpicking, aiming bow, using peephole/safe:
     // Yield to native first-person camera and keep head hidden so camera is not obstructed.
-    if (g_Config.bEnabled && IsMinigameOrCutsceneActive(Controller, hero))
+    // (Stealth and combat takedowns are explicitly kept in third-person!)
+    if (g_Config.bEnabled && !bInTakedown && IsMinigameOrCutsceneActive(Controller, hero))
     {
         UpdateHeroMeshVisibility(Controller, false);
         *(uint32_t*)RESOLVE_ADDR(ThiefGlobals::GIsFirstPersonView) = 1;
@@ -458,7 +536,8 @@ extern "C" void Hook_GetPlayerViewPoint(APlayerController* Controller, FVector* 
     }
 
     // 2. Manage Garrett's head and mesh visibility
-    if (s_LastModState != g_Config.bEnabled || (++s_MeshFrameCounter % 15 == 0))
+    // During a takedown, assert visibility every frame so Garrett's full model and head/hood are rendered
+    if (s_LastModState != g_Config.bEnabled || bInTakedown || (++s_MeshFrameCounter % 15 == 0))
     {
         UpdateHeroMeshVisibility(Controller, g_Config.bEnabled);
         s_LastModState = g_Config.bEnabled;
