@@ -295,6 +295,6 @@ namespace ThiefSignatures
     using tToggleMaterialSections = void(*)(AThiefPawn_Hero* thisHero, void* Sections, uint32_t bHide);
     using tGetLocalPlayerCameraManager = uintptr_t(*)();
     using tAttachComponent = void(*)(USkeletalMeshComponent* mesh, void* comp);
-    using tLineCheck = uint32_t(*)(void* World, FCheckResult& Result, AActor* SourceActor, const FVector& End, const FVector& Start, uint32_t TraceFlags, uint8_t TraceType, const FVector* Extent, void* Opt1, void* Opt2);
+    using tLineCheck = uint32_t(*)(void* World, FCheckResult* Result, AActor* SourceActor, const FVector* End, const FVector* Start, uint32_t TraceFlags, uint8_t TraceType, const FVector* Extent, void* Opt1, void* Opt2);
     using tTraceCameraDistance = float(*)(UThiefCameraBehavior* thisBehavior, const FVector& TargetLocation, const FVector& Direction, float DesiredDistance);
 }

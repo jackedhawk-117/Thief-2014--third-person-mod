@@ -25,6 +25,7 @@ static void* g_pRelayMemory = nullptr;
 
 static bool g_bFirstFrameAfterToggle = true;
 static FVector g_CurrentCameraPos;
+static float g_CurrentCameraDistance = 180.0f;
 
 #pragma pack(push, 1)
 struct RelayThunk
@@ -189,6 +190,103 @@ static AThiefPawn_Hero* GetHeroPawn(APlayerController* Controller)
     return nullptr;
 }
 
+// Helper function to resolve string for an FName index from GNames table
+static const char* GetFNameString(int32_t nameIndex, char* outBuf, size_t maxLen)
+{
+    if (nameIndex < 0 || !outBuf || maxLen == 0)
+        return "";
+
+    outBuf[0] = '\0';
+    uintptr_t namesTable = *(uintptr_t*)RESOLVE_ADDR(ThiefGlobals::GNames);
+    if (!namesTable || !IsValidReadPtr((void*)namesTable, 0x1000))
+        return "";
+
+    uintptr_t pEntry = *(uintptr_t*)(namesTable + ((uintptr_t)nameIndex * sizeof(uintptr_t)));
+    if (!pEntry || !IsValidReadPtr((void*)pEntry, 0x30))
+        return "";
+
+    uint32_t flags = *(uint32_t*)(pEntry + 0x08);
+    if ((flags & 1) == 0) // ASCII string
+    {
+        const char* str = (const char*)(pEntry + 0x14);
+        if (IsValidReadPtr(str, 16))
+        {
+            strncpy(outBuf, str, maxLen - 1);
+            outBuf[maxLen - 1] = '\0';
+            return outBuf;
+        }
+    }
+    else // Wide string
+    {
+        const wchar_t* wstr = (const wchar_t*)(pEntry + 0x14);
+        if (IsValidReadPtr(wstr, 32))
+        {
+            size_t i = 0;
+            while (i < maxLen - 1 && wstr[i] != 0)
+            {
+                outBuf[i] = (char)wstr[i];
+                i++;
+            }
+            outBuf[i] = '\0';
+            return outBuf;
+        }
+    }
+    return "";
+}
+
+// Check if player is currently in a minigame, interaction, bow aiming, or cutscene
+static bool IsMinigameOrCutsceneActive(APlayerController* Controller, AThiefPawn_Hero* hero)
+{
+    if (!Controller || !IsValidReadPtr(Controller, 0x480))
+        return false;
+
+    // Signal A: ViewTarget is an external object / minigame target (not Garrett)
+    if (Controller->ViewTarget.Target && (AActor*)Controller->ViewTarget.Target != (AActor*)hero)
+    {
+        return true;
+    }
+
+    // Signal B: Check Camera's ActiveBehavior
+    uintptr_t cam = *(uintptr_t*)((uintptr_t)Controller + 0x450);
+    if (cam && IsValidReadPtr((void*)cam, 0xC00))
+    {
+        uintptr_t behavior = *(uintptr_t*)(cam + 0xB68);
+        if (behavior && IsValidReadPtr((void*)behavior, 0x300))
+        {
+            // Check behavior class name
+            uintptr_t pClass = *(uintptr_t*)(behavior + 0x50);
+            if (pClass && IsValidReadPtr((void*)pClass, 0x60))
+            {
+                int32_t nameIdx = *(int32_t*)(pClass + 0x48);
+                char nameBuf[128];
+                const char* className = GetFNameString(nameIdx, nameBuf, sizeof(nameBuf));
+                if (className && className[0] != '\0')
+                {
+                    if (strstr(className, "Lockpick") ||
+                        strstr(className, "Marksman") ||
+                        strstr(className, "SmartObject") ||
+                        strstr(className, "Cinematic") ||
+                        strstr(className, "Cineser") ||
+                        strstr(className, "SecondPerson") ||
+                        strstr(className, "Safe") ||
+                        strstr(className, "Keypad") ||
+                        strstr(className, "Takedown") ||
+                        strstr(className, "Aim") ||
+                        strstr(className, "MiniGame") ||
+                        strstr(className, "Minigame") ||
+                        strstr(className, "Peephole") ||
+                        strstr(className, "Keyhole"))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 // Safely resolve Garrett pawn and update head/hood mesh visibility
 static void UpdateHeroMeshVisibility(APlayerController* Controller, bool bThirdPerson)
 {
@@ -259,27 +357,30 @@ static void UpdateHeroMeshVisibility(APlayerController* Controller, bool bThirdP
         // 6. Unhide and show all sections on Mesh3 (+0x14B0, head/hood)
         uintptr_t mesh3 = *(uintptr_t*)((uintptr_t)hero + 0x14B0);
         int32_t secCount3 = 0;
-        if (mesh3 && IsValidReadPtr((void*)mesh3, 0x300))
+        if (g_CurrentCameraDistance >= 38.0f)
         {
-            *(uint32_t*)(mesh3 + 0x158) &= ~0x00400000;
-            uintptr_t skel3 = *(uintptr_t*)(mesh3 + 0x2D0);
-            if (skel3 && IsValidReadPtr((void*)skel3, 0x90))
+            if (mesh3 && IsValidReadPtr((void*)mesh3, 0x300))
             {
-                secCount3 = *(int32_t*)(skel3 + 0x84);
-                for (int s = 0; s < secCount3 && s < 32; ++s)
+                *(uint32_t*)(mesh3 + 0x158) &= ~0x00400000;
+                uintptr_t skel3 = *(uintptr_t*)(mesh3 + 0x2D0);
+                if (skel3 && IsValidReadPtr((void*)skel3, 0x90))
                 {
-                    if (pShowSection) pShowSection((USkeletalMeshComponent*)mesh3, 0, s, 1, 1, 1);
-                    if (pSetSectionHidden) pSetSectionHidden((USkeletalMeshComponent*)mesh3, 0, s, 0);
+                    secCount3 = *(int32_t*)(skel3 + 0x84);
+                    for (int s = 0; s < secCount3 && s < 32; ++s)
+                    {
+                        if (pShowSection) pShowSection((USkeletalMeshComponent*)mesh3, 0, s, 1, 1, 1);
+                        if (pSetSectionHidden) pSetSectionHidden((USkeletalMeshComponent*)mesh3, 0, s, 0);
+                    }
                 }
-            }
 
-            // Call SetHidden(0) via vtable +0x508 on Mesh3
-            void** vtbl = *(void***)mesh3;
-            if (vtbl && IsValidReadPtr(vtbl, 0x510))
-            {
-                typedef void(*tSetHidden)(void*, uint32_t);
-                tSetHidden setHidden = (tSetHidden)vtbl[0x508 / 8];
-                if (setHidden) setHidden((void*)mesh3, 0);
+                // Call SetHidden(0) via vtable +0x508 on Mesh3
+                void** vtbl = *(void***)mesh3;
+                if (vtbl && IsValidReadPtr(vtbl, 0x510))
+                {
+                    typedef void(*tSetHidden)(void*, uint32_t);
+                    tSetHidden setHidden = (tSetHidden)vtbl[0x508 / 8];
+                    if (setHidden) setHidden((void*)mesh3, 0);
+                }
             }
         }
 
@@ -344,6 +445,18 @@ extern "C" void Hook_GetPlayerViewPoint(APlayerController* Controller, FVector* 
         s_bFirstCallLogged = true;
     }
 
+    AThiefPawn_Hero* hero = GetHeroPawn(Controller);
+
+    // Minigame & Cutscene Guard:
+    // If player is lockpicking, aiming bow, using peephole/safe, or in cutscene:
+    // Yield to native first-person camera and keep head hidden so camera is not obstructed.
+    if (g_Config.bEnabled && IsMinigameOrCutsceneActive(Controller, hero))
+    {
+        UpdateHeroMeshVisibility(Controller, false);
+        *(uint32_t*)RESOLVE_ADDR(ThiefGlobals::GIsFirstPersonView) = 1;
+        return;
+    }
+
     // 2. Manage Garrett's head and mesh visibility
     if (s_LastModState != g_Config.bEnabled || (++s_MeshFrameCounter % 15 == 0))
     {
@@ -365,21 +478,152 @@ extern "C" void Hook_GetPlayerViewPoint(APlayerController* Controller, FVector* 
     GetRotatorAxes(*OutRotation, forward, right, up);
 
     FVector headPos = *OutLocation;
-    FVector desiredPos;
-    desiredPos.X = headPos.X - (forward.X * g_Config.Distance) + (right.X * g_Config.ShoulderOffset) + (up.X * g_Config.HeightOffset);
-    desiredPos.Y = headPos.Y - (forward.Y * g_Config.Distance) + (right.Y * g_Config.ShoulderOffset) + (up.Y * g_Config.HeightOffset);
-    desiredPos.Z = headPos.Z - (forward.Z * g_Config.Distance) + (right.Z * g_Config.ShoulderOffset) + (up.Z * g_Config.HeightOffset);
 
-    // 5. Smooth interpolation (exponential decay filter)
-    float dx = desiredPos.X - g_CurrentCameraPos.X;
-    float dy = desiredPos.Y - g_CurrentCameraPos.Y;
-    float dz = desiredPos.Z - g_CurrentCameraPos.Z;
+    // 5. Shoulder probe & pivot calculation
+    // Anchor pivot near Garrett's neck / upper torso, offset by right shoulder and height
+    FVector testPivot;
+    testPivot.X = headPos.X + (right.X * g_Config.ShoulderOffset) + (up.X * g_Config.HeightOffset);
+    testPivot.Y = headPos.Y + (right.Y * g_Config.ShoulderOffset) + (up.Y * g_Config.HeightOffset);
+    testPivot.Z = headPos.Z + (right.Z * g_Config.ShoulderOffset) + (up.Z * g_Config.HeightOffset);
+
+    FVector pivot = testPivot;
+
+    uintptr_t pGWorldPtr = (uintptr_t)RESOLVE_ADDR(ThiefGlobals::GWorld);
+    void* pWorld = pGWorldPtr ? *(void**)pGWorldPtr : nullptr;
+    auto pLineCheck = (ThiefSignatures::tLineCheck)RESOLVE_ADDR(ThiefFunctions::UWorld_LineCheck);
+
+    if (pWorld && IsValidReadPtr(pWorld, 0x100) && pLineCheck)
+    {
+        FVector sweepExtent(12.0f, 12.0f, 12.0f); // 12 uu box sweep ensures near plane never penetrates geometry
+
+        // Probe A: Check clearance from head to pivot (prevents camera getting stuck in wall to player's side)
+        FCheckResult shoulderHit;
+        shoulderHit.Time = 1.0f;
+        uint32_t shoulderClear = pLineCheck(pWorld, &shoulderHit, (AActor*)hero, &testPivot, &headPos, CollisionFlags::TRACE_CameraProbe, 1, &sweepExtent, nullptr, nullptr);
+        if (shoulderClear == 0 && shoulderHit.Time < 1.0f)
+        {
+            float safeFrac = (shoulderHit.Time > 0.15f) ? (shoulderHit.Time - 0.1f) : 0.0f;
+            pivot.X = headPos.X + (testPivot.X - headPos.X) * safeFrac;
+            pivot.Y = headPos.Y + (testPivot.Y - headPos.Y) * safeFrac;
+            pivot.Z = headPos.Z + (testPivot.Z - headPos.Z) * safeFrac;
+        }
+    }
+
+    // 6. Pitch Boom Elevation Damping (Fix for Screenshot 4 overhead view):
+    // In stock spherical orbit, looking down pushes the camera straight up into the ceiling.
+    // Clamp the vertical boom component so camera stays pleasantly behind shoulders.
+    float boomZ = -(forward.Z * g_Config.Distance);
+    if (boomZ > 45.0f) boomZ = 45.0f;
+    if (boomZ < -65.0f) boomZ = -65.0f;
+
+    FVector desiredCamPos;
+    desiredCamPos.X = pivot.X - (forward.X * g_Config.Distance);
+    desiredCamPos.Y = pivot.Y - (forward.Y * g_Config.Distance);
+    desiredCamPos.Z = pivot.Z + boomZ;
+
+    // Calculate camera ray direction and total desired distance
+    FVector rayDir;
+    rayDir.X = desiredCamPos.X - pivot.X;
+    rayDir.Y = desiredCamPos.Y - pivot.Y;
+    rayDir.Z = desiredCamPos.Z - pivot.Z;
+    float rayDist = sqrtf(rayDir.X * rayDir.X + rayDir.Y * rayDir.Y + rayDir.Z * rayDir.Z);
+    if (rayDist > 0.001f)
+    {
+        rayDir.X /= rayDist;
+        rayDir.Y /= rayDist;
+        rayDir.Z /= rayDist;
+    }
+    else
+    {
+        rayDir.X = -forward.X;
+        rayDir.Y = -forward.Y;
+        rayDir.Z = -forward.Z;
+        rayDist = g_Config.Distance;
+    }
+
+    // 7. World Geometry Collision Sweep (LineCheck from pivot along ray)
+    float targetDist = rayDist;
+    if (pWorld && IsValidReadPtr(pWorld, 0x100) && pLineCheck)
+    {
+        FVector sweepExtent(12.0f, 12.0f, 12.0f);
+        FCheckResult camHit;
+        camHit.Time = 1.0f;
+        uint32_t camClear = pLineCheck(pWorld, &camHit, (AActor*)hero, &desiredCamPos, &pivot, CollisionFlags::TRACE_CameraProbe, 1, &sweepExtent, nullptr, nullptr);
+        if (camClear == 0 && camHit.Time < 1.0f)
+        {
+            float hitDist = (rayDist * camHit.Time) - 14.0f; // Pull in 14 units away from collision point
+            if (hitDist < g_Config.MinDistance)
+                hitDist = g_Config.MinDistance;
+            targetDist = hitDist;
+        }
+    }
+
+    // 8. Asymmetric Distance Smoothing:
+    // Instant pull-in when blocked by a wall (prevents even 1 frame of geometry clipping),
+    // smooth ease-out when stepping away into open space.
+    if (g_bFirstFrameAfterToggle)
+    {
+        g_CurrentCameraDistance = targetDist;
+        g_bFirstFrameAfterToggle = false;
+    }
+    else if (targetDist < g_CurrentCameraDistance)
+    {
+        g_CurrentCameraDistance = targetDist; // Instant pull-in
+    }
+    else
+    {
+        g_CurrentCameraDistance += (targetDist - g_CurrentCameraDistance) * 0.15f; // Smooth ease-out
+    }
+
+    // 9. Compute camera position along collision-free ray
+    FVector finalCamPos;
+    finalCamPos.X = pivot.X + (rayDir.X * g_CurrentCameraDistance);
+    finalCamPos.Y = pivot.Y + (rayDir.Y * g_CurrentCameraDistance);
+    finalCamPos.Z = pivot.Z + (rayDir.Z * g_CurrentCameraDistance);
+
+    // 10. Near-Proximity Head/Cowl Hiding (Fix for Screenshot 2 & 3):
+    // When the camera is pushed within 38 units of Garrett's head (backed against a wall):
+    // Temporarily hide ONLY Mesh3 (head/cowl) so camera doesn't clip INSIDE the hood polygon.
+    // Garrett's body (Mesh) and limbs (Mesh2) ALWAYS REMAIN VISIBLE (Garrett never turns invisible).
+    if (hero && IsValidReadPtr(hero, 0x1600))
+    {
+        uintptr_t mesh3 = *(uintptr_t*)((uintptr_t)hero + 0x14B0);
+        if (mesh3 && IsValidReadPtr((void*)mesh3, 0x300))
+        {
+            if (g_CurrentCameraDistance < 38.0f)
+            {
+                *(uint32_t*)(mesh3 + 0x158) |= 0x00400000;
+                void** vtbl = *(void***)mesh3;
+                if (vtbl && IsValidReadPtr(vtbl, 0x510))
+                {
+                    typedef void(*tSetHidden)(void*, uint32_t);
+                    tSetHidden setHidden = (tSetHidden)vtbl[0x508 / 8];
+                    if (setHidden) setHidden((void*)mesh3, 1);
+                }
+            }
+            else
+            {
+                *(uint32_t*)(mesh3 + 0x158) &= ~0x00400000;
+                void** vtbl = *(void***)mesh3;
+                if (vtbl && IsValidReadPtr(vtbl, 0x510))
+                {
+                    typedef void(*tSetHidden)(void*, uint32_t);
+                    tSetHidden setHidden = (tSetHidden)vtbl[0x508 / 8];
+                    if (setHidden) setHidden((void*)mesh3, 0);
+                }
+            }
+        }
+    }
+
+    // 11. Smooth position interpolation (exponential decay filter)
+    float dx = finalCamPos.X - g_CurrentCameraPos.X;
+    float dy = finalCamPos.Y - g_CurrentCameraPos.Y;
+    float dz = finalCamPos.Z - g_CurrentCameraPos.Z;
     float distSq = dx * dx + dy * dy + dz * dz;
 
-    if (g_bFirstFrameAfterToggle || distSq > (500.0f * 500.0f))
+    if (distSq > (500.0f * 500.0f))
     {
-        g_CurrentCameraPos = desiredPos;
-        g_bFirstFrameAfterToggle = false;
+        g_CurrentCameraPos = finalCamPos;
     }
     else
     {
@@ -395,11 +639,11 @@ extern "C" void Hook_GetPlayerViewPoint(APlayerController* Controller, FVector* 
         char buf[128];
         int hx = (int)headPos.X, hy = (int)headPos.Y, hz = (int)headPos.Z;
         int cx = (int)g_CurrentCameraPos.X, cy = (int)g_CurrentCameraPos.Y, cz = (int)g_CurrentCameraPos.Z;
-        wsprintfA(buf, "[CameraMod] View transformed: Head(%d,%d,%d) -> Cam(%d,%d,%d)", hx, hy, hz, cx, cy, cz);
+        wsprintfA(buf, "[CameraMod] View transformed: Head(%d,%d,%d) -> Cam(%d,%d,%d) Dist=%.1f", hx, hy, hz, cx, cy, cz, g_CurrentCameraDistance);
         ModLog(buf);
     }
 
-    // 6. Write modified location into renderer's view info
+    // 12. Write modified location into renderer's view info
     *OutLocation = g_CurrentCameraPos;
 }
 
@@ -428,6 +672,7 @@ static DWORD WINAPI InputThreadProc(LPVOID lpParam)
         {
             g_Config.bEnabled = !g_Config.bEnabled;
             g_bFirstFrameAfterToggle = true;
+            g_CurrentCameraDistance = g_Config.Distance;
             ModLog(g_Config.bEnabled ? "[CameraMod] Switched to 3rd Person View" : "[CameraMod] Switched to 1st Person View");
         }
         bLastToggleState = bToggleDown;
