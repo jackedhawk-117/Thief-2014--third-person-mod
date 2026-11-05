@@ -258,4 +258,120 @@ Eidos Montréal created an extensive hierarchy of `UThiefCameraBehavior` subclas
   - Completely removed all calls to `ShowThirdPersonMesh`, `HideThirdPersonMesh`, and `ToggleMaterialSections`.
   - In 1st person, primary mesh and `Mesh2` are preserved, restoring first-person hands completely.
 
+---
+
+## Phase 9: Camera Wall Collision Detection & Asymmetric Smoothing
+
+### 1. Engine Collision Query Function
+- **Function**: `UWorld::LineCheck`
+- **Address**: `0x140397520` (in `Shipping-ThiefGame.exe`)
+- **Signature**:
+  ```cpp
+  bool LineCheck(UWorld* World, FCheckResult* Result, AActor* SourceActor,
+                 const FVector* End, const FVector* Start, const FVector* Extent,
+                 uint32_t TraceFlags);
+  ```
+- **World Context**: Resolved via `*(UWorld**)(g_Base + 0x238BEA0)` (`GWorld`).
+- **Extent**: Bounding box extent `(12.0f, 12.0f, 12.0f)` sweeps a 24-unit volume along the camera boom ray, preventing the camera view plane from penetrating walls, pillars, or low ceilings.
+- **Trace Flags**: `0x00000001` (`TRACE_World` geometry).
+
+### 2. Pitch Boom Damping
+- In tight corridors, looking upward or downward causes the pitch component to push the camera toward the ceiling or floor, creating an extreme overhead "bird's-eye" angle.
+- The mod damps pitch-induced boom displacement by clamping the effective boom pitch angle to `[-65.0f, +45.0f]`, keeping the framing natural and level while allowing Garrett's aim rotation to pitch freely.
+
+### 3. Asymmetric Camera Smoothing
+- **Pull-In (Collision)**: Instantaneous when geometry is detected behind the camera (`targetDist < currentDist -> currentDist = targetDist`), eliminating wall clipping even during rapid turns or sprints.
+- **Ease-Out (Recovery)**: Smooth lerp (`currentDist += (targetDist - currentDist) * 0.15f * factor`) when stepping away from obstacles, preventing jarring camera snaps.
+
+### 4. Proximity Cowl Hiding
+- When backed against a wall in extremely tight quarters (`currentDist < 38.0f`), the camera enters the volume of Garrett's cowl.
+- Rather than hiding his entire body, the mod dynamically sets `Mesh3->SetHidden(1)` while keeping `Mesh` (cape) and `Mesh2` (torso/limbs) 100% visible.
+- Once distance exceeds `38.0f`, `Mesh3` is instantly unhidden. Garrett remains visible at all times.
+
+---
+
+## Phase 10: Third-Person Stealth & Combat Takedowns
+
+### 1. State Machine Interaction
+- Thief's camera state machine handles context takedowns using `UThiefCameraBehavior_Takedown` and `UThiefCameraBehavior_SecondPerson`.
+- Previously, `IsMinigameOrCutsceneActive` treated all behaviors with name tokens `"Takedown"` or `"SecondPerson"` as interactive sequences, reverting to first person.
+
+### 2. Takedown Exception & Mesh Assertion
+- Implemented `IsTakedownActive(AThiefCamera* camera)`:
+  - Scans active behavior class name in `GNames` for `"Takedown"` or `"SecondPerson"`.
+  - When true, overrides the minigame suppression check to keep the third-person camera active.
+  - Continuously asserts `UpdateHeroMeshVisibility(controller, true)` so all three character components (`Mesh`, `Mesh2`, `Mesh3`) remain fully rendered throughout takedown animations.
+
+---
+
+## Phase 11: Crosshair Parallax Convergence
+
+### 1. Problem Statement
+- In first person, the crosshair is centered along the head ray $\vec{R}_{\text{head}}(t) = \vec{P}_{\text{head}} + t \cdot \vec{F}$.
+- In third person, the camera is offset laterally by shoulder distance $S$ and vertically by height $H$:
+  $$\vec{P}_{\text{cam}} = \vec{P}_{\text{head}} - D \cdot \vec{F} + S \cdot \vec{R} + H \cdot \vec{U}$$
+- If the camera renders strictly parallel to Garrett's head rotation, the crosshair is shifted off-target by $(S, H)$, causing arrows, blackjack swings, and pickpocket reticles to miss.
+
+### 2. Solution: Orthonormal Camera-Local Convergence
+1. **Target Raycast**:
+   - Traces `LineCheck` from $\vec{P}_{\text{head}}$ along Garrett's aim forward vector $\vec{F}$ up to 5,000 units.
+   - If geometry is struck, $\vec{P}_{\text{target}} = \vec{R}_{\text{hit}}$.
+   - If no geometry is struck (open sky/distance), $\vec{P}_{\text{target}} = \vec{P}_{\text{head}} + 2500 \cdot \vec{F}$.
+2. **Camera-to-Target Projection**:
+   - Computes $\vec{V} = \vec{P}_{\text{target}} - \vec{P}_{\text{cam}}$.
+   - Projects $\vec{V}$ onto Garrett's head orthonormal basis:
+     $$\text{localForward} = \vec{V} \cdot \vec{F}, \quad \text{localRight} = \vec{V} \cdot \vec{R}, \quad \text{localUp} = \vec{V} \cdot \vec{U}$$
+3. **Angular Correction in Unreal Rotator Units (65,536 units = 360°)**:
+   $$\Delta \text{Yaw} = \arctan2(\text{localRight}, \text{localForward}) \times \frac{32768}{\pi}$$
+   $$\Delta \text{Pitch} = \arctan2(\text{localUp}, \sqrt{\text{localForward}^2 + \text{localRight}^2}) \times \frac{32768}{\pi}$$
+4. **Application**:
+   - Directly added to `OutRotation->Yaw` and `OutRotation->Pitch` at the `CalcSceneView` hook:
+     ```cpp
+     OutRotation->Yaw += (int32_t)deltaYaw;
+     OutRotation->Pitch += (int32_t)deltaPitch;
+     ```
+   - Center-screen crosshair reticles converge exactly onto the target in 3P across all ranges, angles, and shoulder offsets.
+
+---
+
+## Phase 12: Loading Screen & Main Menu Crash Guards
+
+### 1. Root Cause Analysis
+- When resuming a saved game or returning to the main menu, `ULocalPlayer::CalcSceneView` executes while the world is transitioning.
+- During this window:
+  - `Garrett` pawn exists in a partially constructed state (`HeadPos = (0,0,0)`).
+  - Skeletal mesh assets (`hero->Mesh`, `Mesh2`, `Mesh3`) are streamed asynchronously.
+  - Calling `LineCheck` or indexing into `GNames` with uninitialized or out-of-bounds indices caused `STATUS_ACCESS_VIOLATION` (`0xC0000005`).
+
+### 2. Protective Verification Pipeline
+- **Strict Pointer Validation**: `IsValidReadPtr(hero, 0x1600)` and `IsValidReadPtr(primaryMesh, 0x700)` with `skelMesh` LOD count checks (`0 < lodCount <= 10`).
+- **GNames Bounds Checking**: Verifies `NameIndex < GNames->Num()` before accessing string chunks.
+- **Head Coordinate Sanity**: If $\|\vec{P}_{\text{head}}\| < 1.0$, the hook skips third-person transformation for the frame, allowing the loading screen / main menu to render safely.
+
+---
+
+## Phase 13: Controls, Preserved QuickSave & Configuration
+
+### 1. Hotkey Assignment
+- **Toggle 1P/3P**: <kbd>F4</kbd> (guarded with `!GetAsyncKeyState(VK_MENU)` to prevent triggering on `Alt+F4`).
+- **Shoulder Swap**: <kbd>F3</kbd> (toggles between right and left shoulder).
+- **Native QuickSave**: <kbd>F5</kbd> is completely untouched by the mod, preserving Thief's native quicksave functionality.
+- **Camera Tuning**:
+  - Distance: <kbd>Page Up</kbd> / <kbd>Page Down</kbd>
+  - Height: <kbd>Home</kbd> / <kbd>End</kbd>
+  - Shoulder: <kbd>Insert</kbd> / <kbd>Delete</kbd>
+  - Reset: <kbd>NumPad 0</kbd>
+
+### 2. INI Configuration File
+- Automatically reads `thief_camera.ini` located alongside `dinput8.dll`:
+  ```ini
+  [Camera]
+  ToggleKey=0x73        ; VK_F4
+  Distance=180.0        ; Default distance behind Garrett
+  HeightOffset=25.0     ; Vertical camera height
+  ShoulderOffset=30.0   ; Positive = right, negative = left
+  SmoothFactor=0.25     ; Smoothing factor (0.0 to 1.0)
+  ```
+
+
 

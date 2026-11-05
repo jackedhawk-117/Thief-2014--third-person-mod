@@ -14,16 +14,29 @@ Implemented as a lightweight DirectInput 8 proxy DLL (`dinput8.dll`), this mod p
   - Correctly manages the multi-component character hierarchy (`hero->Mesh` cape, `Mesh2` torso/limbs, `Mesh3` head/hood).
   - Preserves first-person arms and hands when switching back to first person.
   - Automatically re-evaluates and maintains mesh visibility across mantling, swooping, cutscenes, and level transitions.
-- **Dynamic Camera Controls**:
-  - Shoulder swapping (<kbd>F5</kbd>) for peeking around tight corners.
+- **Dynamic Wall Collision Sweeping (`LineCheck`)**:
+  - Sweeps a `12x12x12` bounding box against level geometry using native `UWorld::LineCheck` (`0x140397520`).
+  - Asymmetric smoothing: pulls in instantly when backing up against walls, pillars, or low ceilings; eases out smoothly when moving into open spaces.
+  - Pitch boom damping: prevents awkward overhead bird's-eye camera angles in narrow stairwells and tight corridors.
+- **Proximity Cowl Hiding**:
+  - When the camera is pushed closer than 38 units against obstacles, the mod dynamically hides Garrett's cowl (`Mesh3`) to prevent hood polygon clipping into the camera, while keeping his body and cape 100% visible.
+- **Exact Crosshair Parallax Convergence**:
+  - Traces the player's true line of sight from Garrett's head and computes camera-local orthonormal angular corrections $(\Delta\text{Yaw}, \Delta\text{Pitch})$.
+  - Center-screen crosshair reticles, bow aiming, and interaction prompts converge onto the exact world target in both 1P and 3P without moving the mouse.
+- **Third-Person Stealth & Combat Takedowns**:
+  - Seamlessly maintains third-person camera and continuous full-mesh rendering during stealth and combat takedown animations without snapping into first person.
+- **Native QuickSave Fully Preserved**:
+  - Toggle placed on <kbd>F4</kbd> (with <kbd>Alt+F4</kbd> safety guard) and shoulder swap on <kbd>F3</kbd>, leaving <kbd>F5</kbd> completely untouched for native QuickSave.
+- **Dynamic Camera Controls & INI Configuration**:
+  - Shoulder swapping (<kbd>F3</kbd>) for peeking around tight corners.
   - Hotkeys for adjusting camera distance, height, and lateral shoulder offset on the fly.
   - Camera reset shortcut (<kbd>NumPad 0</kbd>) to return instantly to default framing.
-  - Smooth camera interpolation and lag compensation.
+  - Configurable defaults via `thief_camera.ini` (distance, height, shoulder, toggle key, smoothing).
 - **Gameplay & Interaction Decoupling**:
   - Injected at `ULocalPlayer::CalcSceneView` (`0x1403F6D5E`), modifying only the scene render view matrix.
-  - Target raycasts, pickpocketing, lockpicking, context takedowns, swooping, and dialogue prompts remain anchored to Garrett's character coordinates without desyncing.
+  - Target raycasts, pickpocketing, lockpicking, context prompts, and dialogue triggers remain anchored to Garrett's character coordinates without desyncing.
 - **Crash-Proof & Safe**:
-  - Employs deep Win32 memory validation (`VirtualQuery`) to guard against asynchronous asset streaming races during level loading and save-game resumes.
+  - Employs deep Win32 memory validation (`VirtualQuery`) and strict asset streaming guards to eliminate crashes during map loading, save-game resumes, and main menu transitions.
   - Self-contained proxy with no external background processes or hooked drivers.
 
 ---
@@ -32,8 +45,9 @@ Implemented as a lightweight DirectInput 8 proxy DLL (`dinput8.dll`), this mod p
 
 | Key | Action | Description |
 | :--- | :--- | :--- |
-| <kbd>F4</kbd> | **Toggle 3P Mode** | Switch between Third-Person and First-Person camera |
-| <kbd>F5</kbd> | **Shoulder Swap** | Toggle between right-shoulder and left-shoulder view |
+| <kbd>F4</kbd> | **Toggle 3P Mode** | Switch between Third-Person and First-Person camera (Alt+F4 protected) |
+| <kbd>F3</kbd> | **Shoulder Swap** | Toggle between right-shoulder and left-shoulder view |
+| <kbd>F5</kbd> | *(Game Native)* | **Native QuickSave** (preserved, unmodified by mod) |
 | <kbd>NumPad 0</kbd> | **Reset Camera** | Reset distance, height, and shoulder offsets to defaults |
 | <kbd>Page Up</kbd> | **Zoom In** | Decrease camera distance (bring camera closer) |
 | <kbd>Page Down</kbd> | **Zoom Out** | Increase camera distance (push camera further away) |
@@ -46,21 +60,26 @@ Implemented as a lightweight DirectInput 8 proxy DLL (`dinput8.dll`), this mod p
 
 ## Installation
 
+### Quick Install (Pre-Packaged Release)
+1. Download `Thief2014_ThirdPersonMod_v1.0.zip` from Releases.
+2. Extract `dinput8.dll` and `thief_camera.ini`.
+3. Follow the platform instructions below.
+
 ### Windows
-1. Download or compile `dinput8.dll`.
-2. Locate your *Thief* installation directory.
-3. Place `dinput8.dll` inside the **`Binaries/Win64/`** folder (the directory containing `Shipping-ThiefGame.exe`):
+1. Locate your *Thief* installation directory.
+2. Place `dinput8.dll` and `thief_camera.ini` inside the **`Binaries/Win64/`** folder (the directory containing `Shipping-ThiefGame.exe`):
    ```text
    Thief/
    └── Binaries/
        └── Win64/
            ├── Shipping-ThiefGame.exe
-           └── dinput8.dll  <-- [Place here]
+           ├── dinput8.dll        <-- [Place here]
+           └── thief_camera.ini   <-- [Place here]
    ```
-4. Launch the game normally.
+3. Launch the game normally.
 
 ### Linux / Steam Deck (Proton / Wine / Heroic)
-1. Copy `dinput8.dll` into `Binaries/Win64/`.
+1. Copy `dinput8.dll` and `thief_camera.ini` into `Binaries/Win64/`.
 2. Configure a DLL override for `dinput8` so Wine loads the mod DLL instead of the built-in library:
    - **Steam Launch Options**:
      ```bash
@@ -75,13 +94,16 @@ Implemented as a lightweight DirectInput 8 proxy DLL (`dinput8.dll`), this mod p
 
 ## Building from Source
 
-### Linux (Clang Cross-Compilation)
+### Linux (Clang Cross-Compilation & Packaging)
 The included `Makefile` cross-compiles a clean PE64 DLL using Clang and Wine headers:
 
 ```bash
-# Prerequisites (Debian/Ubuntu/Arch/Fedora with Wine & Clang installed)
+# Prerequisites: Clang, LLD, and Wine development headers
 make clean
 make
+
+# Create a stripped release package (dist/Thief2014_ThirdPersonMod_v1.0.zip):
+make dist
 ```
 
 ### Windows (MSVC / Visual Studio)
@@ -102,9 +124,10 @@ ULocalPlayer::CalcSceneView (0x1403F6BA0)
   │
   ├── Calls APlayerController::eventGetPlayerViewPoint (0x14039A800)
   │     └── [Call-Site Hook Installed Here]
-  │           ├── Calculates orthonormal basis (Forward, Right, Up vectors)
+  │           ├── Traces LineCheck collision against level geometry
+  │           ├── Calculates camera-local orthonormal crosshair convergence
   │           ├── Applies smooth offset & collision thresholding
-  │           └── Updates Garrett mesh visibility states
+  │           └── Updates Garrett multi-component mesh visibility
   │
   └── Builds Scene ViewTranslationMatrix & ViewRotationMatrix
 ```
@@ -130,13 +153,14 @@ The mod cleanly resolves character visibility by:
 
 ```text
 .
-├── camera_mod.cpp     # Third-person camera calculations, input handling & mesh visibility
-├── camera_mod.h       # Mod configuration and exported interfaces
+├── camera_mod.cpp     # Third-person camera calculations, collision sweeps & mesh logic
+├── camera_mod.h       # Mod configuration structure and function prototypes
 ├── dllmain.cpp        # DirectInput 8 proxy exports and DLL lifecycle
-├── thief_structs.h    # Unreal Engine 3 & Eidos Montréal class definitions, RVAs & prototypes
-├── Makefile           # Cross-compilation recipe (Clang x86_64 PE)
+├── thief_structs.h    # Unreal Engine 3 & Eidos Montréal class definitions & RVAs
+├── thief_camera.ini   # Runtime configuration file for distance, height, keys
+├── Makefile           # Cross-compilation recipe (Clang x86_64 PE) & 'make dist'
 ├── dinput8.dll        # Compiled 64-bit proxy DLL ready for release
-├── NOTES.md           # In-depth reverse-engineering findings (Phases 1–8)
+├── NOTES.md           # Complete reverse-engineering findings (Phases 1–13)
 └── rea_triage.yaml    # Binary triage metadata
 ```
 
