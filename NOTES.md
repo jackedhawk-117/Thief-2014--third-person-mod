@@ -258,229 +258,120 @@ Eidos Montréal created an extensive hierarchy of `UThiefCameraBehavior` subclas
   - Completely removed all calls to `ShowThirdPersonMesh`, `HideThirdPersonMesh`, and `ToggleMaterialSections`.
   - In 1st person, primary mesh and `Mesh2` are preserved, restoring first-person hands completely.
 
-
 ---
 
-## Phase 9: Camera Collision & Wall-Clipping Prevention (Issue 1 Findings)
+## Phase 9: Camera Wall Collision Detection & Asymmetric Smoothing
 
-### 1. Engine Trace Function Architecture (`UWorld::LineCheck`)
-- **Virtual Address**: `0x140397520` (RVA `0x397520`).
+### 1. Engine Collision Query Function
+- **Function**: `UWorld::LineCheck`
+- **Address**: `0x140397520` (in `Shipping-ThiefGame.exe`)
 - **Signature**:
   ```cpp
-  uint32_t UWorld_LineCheck(
-      void* World,                   // RCX: UWorld* (from GWorld global at 0x1421065A0)
-      FCheckResult* OutResult,       // RDX: Output collision result struct (0x74 bytes)
-      AActor* SourceActor,           // R8:  Actor to ignore (Garrett Pawn, prevents self-hits)
-      const FVector* End,            // R9:  Destination / desired camera coordinate
-      const FVector* Start,          // [rsp+28h]: Pivot coordinate (e.g. Garrett's head/neck)
-      uint32_t TraceFlags,           // [rsp+30h]: Collision channels and flags
-      uint8_t TraceType,             // [rsp+38h]: Trace query type (1 = camera probe, 3 = distance)
-      const FVector* Extent,         // [rsp+40h]: Box sweep half-extents (e.g. {12.0f, 12.0f, 12.0f})
-      void* Opt1,                    // [rsp+48h]: Optional parameter (nullptr)
-      void* Opt2                     // [rsp+50h]: Optional parameter (nullptr)
-  );
+  bool LineCheck(UWorld* World, FCheckResult* Result, AActor* SourceActor,
+                 const FVector* End, const FVector* Start, const FVector* Extent,
+                 uint32_t TraceFlags);
   ```
-- **Calling Convention**: Microsoft x64 `__fastcall`.
-- **Return Semantics**:
-  - `1` (true): **No collision** occurred (line of sight is clear). `OutResult->Time` is set to `1.0f`, `OutResult->Actor = nullptr`.
-  - `0` (false): **Collision blocked** by geometry/actor. `OutResult` is populated with 0x74 bytes of hit data.
-- **`FCheckResult` Layout (0x74 bytes)**:
-  - `+0x00` (8 bytes): `FCheckResult* Next` (next hit link in multi-line checks)
-  - `+0x08` (8 bytes): `AActor* Actor` (hit actor, nullptr for static world geometry / BSP)
-  - `+0x10` (12 bytes): `FVector Location` (world impact coordinates)
-  - `+0x1C` (12 bytes): `FVector Normal` (surface normal unit vector at impact)
-  - `+0x28` (4 bytes): `float Time` (normalized impact fraction `[0.0, 1.0]`)
-  - `+0x2C` (4 bytes): `int32_t Item` (sub-element / face index)
-  - `+0x30` (8 bytes): `UPrimitiveComponent* Component` (primitive component hit)
-  - `+0x38` (8 bytes): `void* PhysMaterial` (physical material hit)
-  - `+0x40` (52 bytes): Internal trace query metadata
-- **Trace Flags**:
-  - `0x8020DF` (`TRACE_CameraProbe`): Used by Eidos Montréal in native camera collision.
-    - Bit breakdown: `TRACE_Pawns (0x1) | TRACE_Movers (0x2) | TRACE_Level (0x4) | TRACE_Volumes (0x8) | TRACE_Others (0x10) | TRACE_Blocking (0x40) | TRACE_LevelGeometry (0x80) | TRACE_Visible (0x2000) | TRACE_ComplexCollision (0x800000)`.
-  - `0x2086` (`TRACE_WorldGeometry`): `TRACE_Movers | TRACE_Level | TRACE_LevelGeometry | TRACE_Visible`.
-- **Confidence**: 100% Confirmed (Decompiled at `0x140397520`, verified via callers at `0x140C06709`, `0x140C10656`, `0x140C2DEAB`).
+- **World Context**: Resolved via `*(UWorld**)(g_Base + 0x238BEA0)` (`GWorld`).
+- **Extent**: Bounding box extent `(12.0f, 12.0f, 12.0f)` sweeps a 24-unit volume along the camera boom ray, preventing the camera view plane from penetrating walls, pillars, or low ceilings.
+- **Trace Flags**: `0x00000001` (`TRACE_World` geometry).
 
-### 2. Eidos Custom Camera Collision & Wall-Avoidance System
-- **`UThiefCamera_TraceCameraProbe` (`0x140C06470`)**:
-  - Decompilation reveals the native camera probe routine. It computes pivot position from `Garrett->Rotation` (`+0x8c`), sweeps a box towards the target camera point using `UWorld_LineCheck` with `TraceFlags = 0x8020DF`, `TraceType = 1`, and `SourceActor = Garrett Pawn`.
-  - It handles hit response by clamping distance fraction to `Result.Time`, and applies an asymmetric lerp (fast pull-in on hit, gradual ease-out on clearance).
-- **`UThiefCamera_UpdateCameraCollision` (`0x140C072F0`)**:
-  - Dispatches to `UThiefCamera_TraceCameraProbe` after checking if Garrett is in specific interaction states (`Garrett + 0x10a8 -> 0x68 -> 0x104`).
-- **Confidence**: 100% Confirmed (Decompiled in Ghidra and renamed).
+### 2. Pitch Boom Damping
+- In tight corridors, looking upward or downward causes the pitch component to push the camera toward the ceiling or floor, creating an extreme overhead "bird's-eye" angle.
+- The mod damps pitch-induced boom displacement by clamping the effective boom pitch angle to `[-65.0f, +45.0f]`, keeping the framing natural and level while allowing Garrett's aim rotation to pitch freely.
 
-### 3. Collision Integration Strategy for Mod Hook
-1. **Pivot**:
-   - `Pivot = OutLocation + (Up * HeightOffset * 0.5f)` (anchored near Garrett's upper torso/neck).
-2. **Sweep Extent**:
-   - `Extent = FVector(12.0f, 12.0f, 12.0f)` (prevents near-clipping plane from penetrating wall meshes).
-3. **Trace Execution**:
-   - Invoke `UWorld_LineCheck(GWorld, &result, hero, &desiredPos, &pivot, 0x8020DF, 1, &extent, nullptr, nullptr)`.
-4. **Collision Pull-In & Smoothing**:
-   - If blocked (`result.Time < 1.0f`):
-     - `hitDistance = desiredDistance * result.Time - collisionMargin` (with `collisionMargin = 6.0f`).
-     - Snap or fast-lerp (`alpha = 0.8f` to `1.0f`) to immediately prevent geometry clipping.
-   - When clear (`result.Time == 1.0f`):
-     - Smoothly ease back out to full `g_Config.Distance` using frame smoothing factor (`alpha = 0.15f`).
-5. **Near-Proximity Player Occlusion**:
-   - If collision distance pulls in under `g_Config.MinDistance` (e.g. `< 40.0f`):
-     - Automatically hide head/torso mesh (`Mesh3` / `Mesh2`) to avoid camera clipping inside Garrett's model.
+### 3. Asymmetric Camera Smoothing
+- **Pull-In (Collision)**: Instantaneous when geometry is detected behind the camera (`targetDist < currentDist -> currentDist = targetDist`), eliminating wall clipping even during rapid turns or sprints.
+- **Ease-Out (Recovery)**: Smooth lerp (`currentDist += (targetDist - currentDist) * 0.15f * factor`) when stepping away from obstacles, preventing jarring camera snaps.
 
+### 4. Proximity Cowl Hiding
+- When backed against a wall in extremely tight quarters (`currentDist < 38.0f`), the camera enters the volume of Garrett's cowl.
+- Rather than hiding his entire body, the mod dynamically sets `Mesh3->SetHidden(1)` while keeping `Mesh` (cape) and `Mesh2` (torso/limbs) 100% visible.
+- Once distance exceeds `38.0f`, `Mesh3` is instantly unhidden. Garrett remains visible at all times.
 
 ---
 
-## Phase 10: Minigame & Interaction Camera Detection (Issue 2 Findings)
+## Phase 10: Third-Person Stealth & Combat Takedowns
 
-### 1. Camera Behavior State Machine & Interaction Representation
-- **Primary Signal**: `AThiefCamera::ActiveBehavior` (`cam + 0xB68`).
-  - Class Pointer: `*(UClass**)((uintptr_t)behavior + 0x50)`.
-  - Class Name: Retrieved from `pClass->Name.Index` via `GNames` lookup (`0x1420F2918`).
-- **Behaviors that Represent Minigames / Forced First-Person**:
-  - `UThiefCameraLockpick`: Lockpicking minigame.
-  - `UThiefCameraMarksman` / `UThiefCameraMarksmanAim`: Bow drawing, precision zoom, and projectile aiming.
-  - `UThiefCameraSmartObjectDriven`: Peeking through keyholes, peepholes, and crawlspace exploration.
-  - `UThiefCameraCinematicCamActor` / `UThiefCameraCinematicCineser`: Scripted in-engine cutscenes and conversations.
-  - `UThiefCameraCinematicSecondPersonConfig`: Takedown animations and corner peeking.
-- **Behaviors that Support Third-Person Locomotion**:
-  - `UThiefCameraFirstPerson`: Standard walking/running/sneaking.
-  - `UThiefCameraRush`: Swoop quick-dash navigation.
-  - `UThiefCameraVNav` / `UThiefCameraVNavEntry`: Pipe, ledge, rope climbing.
-  - `UThiefCameraThird`: Stock 3P behavior.
-- **Secondary Signal**: `APlayerController::ViewTarget.Target` (`Controller + 0x48C`).
-  - If `ViewTarget.Target != nullptr && ViewTarget.Target != hero`, the camera is focused on an interactive object (such as a safe combination dial or remote camera).
-- **Behavior Flags**: `ActiveBehavior->Flags` at `+0x2D0`.
-  - Bit 1 (`0x2`): FirstPerson view forced by engine.
-- **Confidence**: 100% Confirmed (Verified via `AThiefCamera::GetCameraViewPoint` at `0x140BE8DA0` and `UThiefCameraBehavior_SetFirstPersonView` at `0x140BFC720`).
+### 1. State Machine Interaction
+- Thief's camera state machine handles context takedowns using `UThiefCameraBehavior_Takedown` and `UThiefCameraBehavior_SecondPerson`.
+- Previously, `IsMinigameOrCutsceneActive` treated all behaviors with name tokens `"Takedown"` or `"SecondPerson"` as interactive sequences, reverting to first person.
+
+### 2. Takedown Exception & Mesh Assertion
+- Implemented `IsTakedownActive(AThiefCamera* camera)`:
+  - Scans active behavior class name in `GNames` for `"Takedown"` or `"SecondPerson"`.
+  - When true, overrides the minigame suppression check to keep the third-person camera active.
+  - Continuously asserts `UpdateHeroMeshVisibility(controller, true)` so all three character components (`Mesh`, `Mesh2`, `Mesh3`) remain fully rendered throughout takedown animations.
 
 ---
 
-## Phase 11: Player Head Hiding & View Restoration Architecture (Issue 3 Findings)
+## Phase 11: Crosshair Parallax Convergence
 
-### 1. Native Character Head/Neck Decomposition
-- **Garrett Skeletal Components**:
-  - `hero->Mesh` (`hero + 0x444`): Primary skeletal component (cape and main skeleton). Garrett's actual head and neck bones belong to this component.
-  - `hero->Mesh2` (`hero + 0x14A8`): Secondary skeletal component (torso, arms, and legs) attached at socket `0x1530`. In first person, this component provides the visible arms and hands.
-  - `hero->Mesh3` (`hero + 0x14B0`): Attached head accessory/quiver component at socket `0x1538` (`Head` socket).
-- **Why Garrett's Head Obstructed First-Person View**:
-  - In third person, the mod previously called `AThiefPawn_Hero_ShowAllMaterialSections` (`0x140B3B630`), which unhid all bones on `hero->Mesh`.
-  - When returning to first person, the mod did not re-hide the head/neck bones or face material sections. Consequently, Garrett's head mesh remained rendered right in front of the camera, blocking the screen.
-- **Engine-Native Head Hiding Mechanism (`AThiefPawn_Hero_HideThirdPersonMesh` at `0x140B47D80`)**:
-  - Bone Hiding: `hero->HiddenBoneIndices` (`hero + 0x15B8`, count at `+0x15C0`) contains the exact bone indices for Garrett's head and neck.
-    - Hiding: `USkeletalMeshComponent_HideBone(hero->Mesh, boneIndex, 1, 1, 1)` (`0x140497270`).
-    - Unhiding: `USkeletalMeshComponent_HideBone(hero->Mesh, boneIndex, 0, 1, 1)`.
-  - Material Section Hiding: `hero->HiddenMaterialSections` (`hero + 0x15A8`).
-    - Hiding: `AThiefPawn_Hero_ToggleMaterialSections(hero, &hero->HiddenMaterialSections, 1)` (`0x140B3B790`).
-    - Unhiding: `AThiefPawn_Hero_ToggleMaterialSections(hero, &hero->HiddenMaterialSections, 0)`.
-  - Head Accessory Hiding: `Mesh3` (`hero + 0x14B0`).
-    - Hiding: `Mesh3->bHidden |= 0x00400000; Mesh3->SetHidden(1);` via vtable `+0x508`.
-    - Unhiding: `Mesh3->bHidden &= ~0x00400000; Mesh3->SetHidden(0);`.
-  - First-Person Arms Preservation: `Mesh2` (`hero + 0x14A8`) must NOT have `bHidden` set, so first-person arms and hands remain visible.
-- **Shadow Preservation**:
-  - `HideBone(..., bPhysOnly=1, bIncludeDescendants=1)` in first person hides the geometry from the scene view camera without disabling shadow rendering, ensuring Garrett still casts natural character shadows.
-- **Confidence**: 100% Confirmed (Decompiled at `0x140B47D80` and `0x140B3B630`).
+### 1. Problem Statement
+- In first person, the crosshair is centered along the head ray $\vec{R}_{\text{head}}(t) = \vec{P}_{\text{head}} + t \cdot \vec{F}$.
+- In third person, the camera is offset laterally by shoulder distance $S$ and vertically by height $H$:
+  $$\vec{P}_{\text{cam}} = \vec{P}_{\text{head}} - D \cdot \vec{F} + S \cdot \vec{R} + H \cdot \vec{U}$$
+- If the camera renders strictly parallel to Garrett's head rotation, the crosshair is shifted off-target by $(S, H)$, causing arrows, blackjack swings, and pickpocket reticles to miss.
 
----
-
-## Phase 13: Refinement & Defect Resolution (Full Head Rendering, Flickering Elimination, Minigame Lockpick Zoom)
-
-### 1. Root Cause Analysis: Head Incompleteness & First-Person Obstruction
-- **Observation**: In third person, only Garrett's eyes and face mask portion were rendered, with the rest of his head/cowl missing. In first person, the eyes and mask remained rendered directly in front of the camera, obstructing the view.
-- **Decompilation Findings**:
-  - Garrett is composed of multiple components: the primary skeleton `hero->Mesh` (+0x444) plus up to 14 attached gear/accessory components (`hero->Mesh->Attachments` at `+0x44C`, count at `+0x454`, and direct pointers at `hero + 0x1490 + uVar * 8`).
-  - The cowl, eyes mask, and facial accessories are separate attached components mounted on head sockets (`Head`, `Bone-Head`, `hero->SocketName` at `+0x1538`).
-  - In third person, `hero->Mesh` previously retained hidden bone states from first person because `hero->HiddenBoneIndices.Num` is often zero or uninitialized at load time, leaving `HeadBoneIndex` hidden on the primary mesh.
-  - In first person, only bones on `hero->Mesh` were being hidden; the attached head accessories (eyes/mask) were never hidden, leaving them hovering in front of the camera.
-- **Fix**:
-  - **3rd Person**: Loop over all `totalBones` (`*(int32_t*)(skel + 0x44)`) on `hero->Mesh` and unhide every bone (`pSetHideBone(mesh, b, 0, 1, 1)`). Iterate through all `hero->Mesh->Attachments` and gear components `+0x1498` to `+0x14F8`, clearing `bHidden` and calling `SetHidden(0)` so Garrett's complete head, hood, cowl, mask, eyes, and torso render fully.
-  - **1st Person**: In addition to hiding `cam->HeadBoneIndex` on `hero->Mesh`, iterate through `hero->Mesh->Attachments` and hide all components attached to sockets containing `Head`, `head`, `Neck`, `Face`, `Mask`, `Eyes`, or `hero->SocketName` (+0x1538). This completely eliminates the eyes/mask floating obstruction while keeping `Mesh2` (1P arms/hands) fully visible.
-
-### 2. Root Cause Analysis: Character Model Flickering
-- **Observation**: Character model repeatedly flickered while walking or standing in third person.
-- **Root Cause**:
-  - `UpdateHeroMeshVisibility` was being invoked every 15 frames (`++s_MeshFrameCounter % 15 == 0`). Each invocation called `ShowThirdPersonMesh`, re-attaching components (`FUN_1404a96c0`) and toggling section visibility multiple times per second.
-  - Near-proximity occlusion also lacked hysteresis, causing rapid toggling across boundary thresholds.
-- **Fix**:
-  - Removed periodic execution: `UpdateHeroMeshVisibility` is now strictly triggered on state transition (`s_LastModState != bEffective3P`).
-  - Added hysteresis to near-proximity occlusion (`< 15.0f` to hide, `> 25.0f` to unhide).
-
-### 3. Root Cause Analysis: Lockpicking Zoom Failure
-- **Observation**: Lockpicking did not zoom in.
-- **Root Cause**:
-  - `Shipping-ThiefGame.exe` utilizes Huffman/dictionary compressed strings in `GNames` (flag bit `0x2` set). The mod's manual string reader failed to decompress names, returning empty strings and causing `IsMinigameOrCutsceneActive` to evaluate to `false`.
-  - Because `bInMinigame` was false, the mod continued applying the 180 uu 3rd-person camera offset over the lockpicking camera, cancelling the zoom.
-- **Fix**:
-  - Integrated native `FName_ToString` (`0x1400E4EB0`) with `appFree` (`0x14005DD20`) to decode both compressed and uncompressed FNames with 100% fidelity.
-  - Added native interaction check from `UThiefCamera_UpdateCameraCollision` (`0x140C072F0`): `hero + 0x10A8 -> +0x68 -> +0x104` (`pAction`). If non-null, lockpicking / interaction is active.
-  - Added camera FOV check: if `cam->POV.FOV < 60.0f` (active zoom), automatically bypass camera offset and maintain first person.
-
-
-### 1. Issue 1 Fix: Camera Collision & Wall-Clipping Prevention
-- **Implementation**:
-  - `Hook_GetPlayerViewPoint` queries `UWorld_LineCheck` (`0x140397520`) via global pointer `GWorld` (`0x1421065A0`).
-  - Uses two-stage box sweep with extent `(12.0f, 12.0f, 12.0f)` and trace flags `0x8020DF` (`TRACE_CameraProbe`):
-    - **Stage 1 (Head to Pivot)**: Prevents the shoulder offset from penetrating walls when Garrett is backed against a corner.
-    - **Stage 2 (Pivot to Desired Camera Location)**: Sweeps backwards along the camera view direction.
-  - On collision (`camHit.Time < 1.0f`), camera distance clamps to `desiredDistance * camHit.Time - 14.0f`.
-  - **Asymmetric Smoothing**: Instant pull-in on obstruction (0-frame latency to eliminate near-clipping penetration); smooth ease-out lerp (`alpha = 0.15f`) when returning to open space.
-  - **Proximity Occlusion**: If camera distance pulls in under 35 uu, `Mesh3` (head accessory/quiver) is hidden. If under 20 uu, primary mesh is hidden to avoid near-plane camera clipping through Garrett's head/torso.
-
-### 2. Issue 2 Fix: Minigames & Special Interactions Forced to First Person
-- **Implementation**:
-  - `IsMinigameOrCutsceneActive` dynamically evaluates both `Controller->ViewTarget.Target` and `AThiefCamera->ActiveBehavior` (`cam + 0xB68`).
-  - Class names are resolved from `GNames` (`0x1420F2918`).
-  - Forced 1P triggered when behavior class name contains:
-    - `"Lockpick"`, `"Marksman"`, `"SmartObject"`, `"Cinematic"`, `"Cineser"`, `"SecondPerson"`, `"Safe"`, `"Keypad"`, `"Takedown"`, `"Aim"`, `"MiniGame"`, `"Minigame"`, `"Peephole"`, `"Keyhole"`.
-  - In minigames, the mod bypasses camera offset, leaving `*OutLocation` and `*OutRotation` 100% untouched for the engine's native camera.
-  - On returning to 3P, camera re-initializes smoothly without snapping (`g_bFirstFrameAfterToggle = true`).
-
-### 3. Issue 3 Fix: Player Head Hiding & View Restoration Architecture
-- **Implementation**:
-  - Root cause resolved: Eidos's native `AThiefPawn_Hero_HideThirdPersonMesh` specifically requires `GIsFirstPersonView == 0` when entered. The mod ensures `GIsFirstPersonView = 0` before invoking `AThiefPawn_Hero_HideThirdPersonMesh(hero)` (`0x140B47D80`), then sets `GIsFirstPersonView = 1`.
-  - Fallback loops explicitly hide all head/neck bones in `hero->HiddenBoneIndices` via `USkeletalMeshComponent_HideBone(mesh, bone, 1, 1, 1)` and material sections via `AThiefPawn_Hero_ToggleMaterialSections(hero, &hero->HiddenMaterialSections, 1)`.
-  - `Mesh2` (+0x14A8, torso and 1st-person arms/hands) is explicitly kept visible (`BitFlags &= ~0x00400000`).
-  - In third person, `AThiefPawn_Hero_ShowThirdPersonMesh(hero)` (`0x140B3B850`) is called with `GIsFirstPersonView = 0`, unhiding head, neck, hood, torso, and accessory meshes (`Mesh3`).
+### 2. Solution: Orthonormal Camera-Local Convergence
+1. **Target Raycast**:
+   - Traces `LineCheck` from $\vec{P}_{\text{head}}$ along Garrett's aim forward vector $\vec{F}$ up to 5,000 units.
+   - If geometry is struck, $\vec{P}_{\text{target}} = \vec{R}_{\text{hit}}$.
+   - If no geometry is struck (open sky/distance), $\vec{P}_{\text{target}} = \vec{P}_{\text{head}} + 2500 \cdot \vec{F}$.
+2. **Camera-to-Target Projection**:
+   - Computes $\vec{V} = \vec{P}_{\text{target}} - \vec{P}_{\text{cam}}$.
+   - Projects $\vec{V}$ onto Garrett's head orthonormal basis:
+     $$\text{localForward} = \vec{V} \cdot \vec{F}, \quad \text{localRight} = \vec{V} \cdot \vec{R}, \quad \text{localUp} = \vec{V} \cdot \vec{U}$$
+3. **Angular Correction in Unreal Rotator Units (65,536 units = 360°)**:
+   $$\Delta \text{Yaw} = \arctan2(\text{localRight}, \text{localForward}) \times \frac{32768}{\pi}$$
+   $$\Delta \text{Pitch} = \arctan2(\text{localUp}, \sqrt{\text{localForward}^2 + \text{localRight}^2}) \times \frac{32768}{\pi}$$
+4. **Application**:
+   - Directly added to `OutRotation->Yaw` and `OutRotation->Pitch` at the `CalcSceneView` hook:
+     ```cpp
+     OutRotation->Yaw += (int32_t)deltaYaw;
+     OutRotation->Pitch += (int32_t)deltaPitch;
+     ```
+   - Center-screen crosshair reticles converge exactly onto the target in 3P across all ranges, angles, and shoulder offsets.
 
 ---
 
-## Phase 14: Restoring 3rd Person Toggle, Full Head & Torso Rendering, and 1P Hand Visibility
+## Phase 12: Loading Screen & Main Menu Crash Guards
 
-### 1. Root Cause Analysis: Lost 3rd Person & Non-functional F4 Toggle
-- **Observation**: Mod was locked in 1st person; pressing F4 had no visible effect.
-- **Decompilation Findings**:
-  - In `IsMinigameOrCutsceneActive`, `pAction` at `hero + 0x10A8 -> +0x68 -> +0x104` was tested for `pAction != nullptr`.
-  - In UE3/Thief, Garrett has an active action (idle, walk, run) on every frame. Checking `pAction != 0` caused `IsMinigameOrCutsceneActive` to return `true` continuously on 100% of frames!
-  - Consequently, `bEffective3P = g_Config.bEnabled && !bInMinigame` was permanently `false`, locking the camera in 1P.
-  - Native decompilation of `UThiefCamera_UpdateCameraCollision` (`0x140C072F0`) revealed the true check used by Eidos:
-    ```c
-    lVar1 = *(longlong*)(*(longlong*)(*(longlong*)(*(longlong*)(*(longlong*)(CameraBehavior + 0x7c) + 0x718) + 0x10a8) + 0x68) + 0x104);
-    if (lVar1 != 0) {
-      iVar2 = *(int*)(*(longlong*)(lVar1 + 0x28) + 0x9c);
-      if (iVar2 == 3 || iVar2 == 4) return;
-    }
-    ```
-    Only `actionType == 3` (interactive minigame: lockpick, peephole) or `actionType == 4` (interactive puzzle: safe cracking) indicate minigame lock.
-  - Furthermore, `GetFNameWide` was passing `uint64_t` by value into `FName_ToString` (`0x1400E4EB0`) instead of `const FName*` in `RCX`, which was corrected to pass `const FName*`.
-  - Removed unaligned 64-bit read of `ViewTarget.Target` at `+0x48C`.
+### 1. Root Cause Analysis
+- When resuming a saved game or returning to the main menu, `ULocalPlayer::CalcSceneView` executes while the world is transitioning.
+- During this window:
+  - `Garrett` pawn exists in a partially constructed state (`HeadPos = (0,0,0)`).
+  - Skeletal mesh assets (`hero->Mesh`, `Mesh2`, `Mesh3`) are streamed asynchronously.
+  - Calling `LineCheck` or indexing into `GNames` with uninitialized or out-of-bounds indices caused `STATUS_ACCESS_VIOLATION` (`0xC0000005`).
 
-### 2. Root Cause Analysis: Head Missing Except Eyes/Mask, No Torso in 3P, Missing Hands in 1P
-- **Decompilation Findings**:
-  - `hero->HiddenMaterialSections` (`hero + 0x15A8`) contains only a small subset of section indices (2-3 sections).
-  - Calling only `AThiefPawn_Hero_ToggleMaterialSections` left the remaining material sections on `hero->Mesh` (head/hood) and all sections on `hero->Mesh2` (+0x14A8, torso and arms) hidden!
-  - In 3rd person:
-    - We must iterate and show all sections on `hero->Mesh` (`skelMesh + 0x84`), `hero->Mesh2` (`skel2 + 0x84`), and `hero->Mesh3` (`skel3 + 0x84`).
-    - We must unhide all bones on `hero->Mesh` skeleton (`skel + 0x44`).
-    - We unhide all attached accessories (`hero->Mesh->Attachments` and `hero + 0x1490 + c*8`).
-  - In 1st person:
-    - We hide head/neck bones on `hero->Mesh` and sections in `HiddenMaterialSections`.
-    - We hide all attached components on head sockets (`Head`, `Face`, `Mask`, `Eyes`, `Cowl`, `Hood`, `SocketName`).
-    - We ensure `hero->Mesh2` (1P arms/hands) is explicitly unhidden and shown with `SetHidden(0)` and section iteration so Garrett's hands and tools are always visible.
-  - Startup / Spawn Tracking:
-    - Added `s_bInitialApplied` and `s_pLastHero` to ensure `UpdateHeroMeshVisibility` executes as soon as the hero pawn finishes spawning, avoiding missed transitions during level load.
+### 2. Protective Verification Pipeline
+- **Strict Pointer Validation**: `IsValidReadPtr(hero, 0x1600)` and `IsValidReadPtr(primaryMesh, 0x700)` with `skelMesh` LOD count checks (`0 < lodCount <= 10`).
+- **GNames Bounds Checking**: Verifies `NameIndex < GNames->Num()` before accessing string chunks.
+- **Head Coordinate Sanity**: If $\|\vec{P}_{\text{head}}\| < 1.0$, the hook skips third-person transformation for the frame, allowing the loading screen / main menu to render safely.
 
-### 3. Verification & Deployment Status
-- **Binary Rebuilt**: `dinput8.dll` compiled cleanly with Clang 22 (Wine MinGW-w64).
-- **Deployed Target**: `/home/jackedhawk117/Games/Heroic/ThiefvWwV2/Binaries/Win64/dinput8.dll`.
+---
 
+## Phase 13: Controls, Preserved QuickSave & Configuration
 
+### 1. Hotkey Assignment
+- **Toggle 1P/3P**: <kbd>F4</kbd> (guarded with `!GetAsyncKeyState(VK_MENU)` to prevent triggering on `Alt+F4`).
+- **Shoulder Swap**: <kbd>F3</kbd> (toggles between right and left shoulder).
+- **Native QuickSave**: <kbd>F5</kbd> is completely untouched by the mod, preserving Thief's native quicksave functionality.
+- **Camera Tuning**:
+  - Distance: <kbd>Page Up</kbd> / <kbd>Page Down</kbd>
+  - Height: <kbd>Home</kbd> / <kbd>End</kbd>
+  - Shoulder: <kbd>Insert</kbd> / <kbd>Delete</kbd>
+  - Reset: <kbd>NumPad 0</kbd>
+
+### 2. INI Configuration File
+- Automatically reads `thief_camera.ini` located alongside `dinput8.dll`:
+  ```ini
+  [Camera]
+  ToggleKey=0x73        ; VK_F4
+  Distance=180.0        ; Default distance behind Garrett
+  HeightOffset=25.0     ; Vertical camera height
+  ShoulderOffset=30.0   ; Positive = right, negative = left
+  SmoothFactor=0.25     ; Smoothing factor (0.0 to 1.0)
+  ```
 
 
 

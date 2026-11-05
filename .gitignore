@@ -4,6 +4,8 @@ Shipping-ThiefGame.exe
 
 # Intermediate compilation artifacts
 *.o
+dist/
+*.zip
 
 # Runtime logs
 *.log

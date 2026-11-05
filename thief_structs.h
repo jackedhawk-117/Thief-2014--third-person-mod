@@ -34,11 +34,10 @@ struct FName
 
 struct FNameEntry
 {
-    uint64_t Flags;                 // +0x00
-    uint32_t NameFlags;             // +0x08 (Bit 0: Unicode if 1, ASCII if 0)
-    int32_t Index;                  // +0x0C
-    uint32_t Pad_10;                // +0x10
-    union                           // +0x14
+    uint64_t Flags;
+    int32_t Index;
+    FNameEntry* HashNext;
+    union
     {
         char AnsiName[1024];
         wchar_t WideName[1024];
@@ -49,13 +48,6 @@ template<typename T>
 struct TArray
 {
     T* Data;
-    int32_t Num;
-    int32_t Max;
-};
-
-struct FString
-{
-    wchar_t* Data;
     int32_t Num;
     int32_t Max;
 };
@@ -271,12 +263,7 @@ namespace ThiefFunctions
     constexpr uintptr_t AThiefCamera_GetCameraViewPoint = 0x140BE8DA0;
     constexpr uintptr_t AThiefCamera_GetFOVAngle = 0x140BE8E60;
     constexpr uintptr_t UWorld_LineCheck = 0x140397520;
-    constexpr uintptr_t UThiefCamera_TraceCameraProbe = 0x140C06470;
-    constexpr uintptr_t UThiefCamera_UpdateCameraCollision = 0x140C072F0;
     constexpr uintptr_t UThiefCamera_TraceCameraDistance = 0x140C104B0;
-    constexpr uintptr_t FName_ToString = 0x1400E4EB0;
-    constexpr uintptr_t appFree = 0x14005DD20;
-    constexpr uintptr_t appMalloc = 0x14005DCD0;
 
     // Mesh Visibility & Character Pipeline
     constexpr uintptr_t AThiefPawn_Hero_ShowThirdPersonMesh = 0x140B3B850;
@@ -309,9 +296,5 @@ namespace ThiefSignatures
     using tGetLocalPlayerCameraManager = uintptr_t(*)();
     using tAttachComponent = void(*)(USkeletalMeshComponent* mesh, void* comp);
     using tLineCheck = uint32_t(*)(void* World, FCheckResult* Result, AActor* SourceActor, const FVector* End, const FVector* Start, uint32_t TraceFlags, uint8_t TraceType, const FVector* Extent, void* Opt1, void* Opt2);
-    using tTraceCameraProbe = void(*)(void* CameraBehavior, float DeltaTime, FVector* OutCameraLocation);
-    using tUpdateCameraCollision = void(*)(void* CameraBehavior, float DeltaTime, FVector* OutCameraLocation);
     using tTraceCameraDistance = float(*)(UThiefCameraBehavior* thisBehavior, const FVector& TargetLocation, const FVector& Direction, float DesiredDistance);
-    using tFName_ToString = void(*)(const FName* thisName, FString* OutStr);
-    using tAppFree = void(*)(void* Ptr);
 }
