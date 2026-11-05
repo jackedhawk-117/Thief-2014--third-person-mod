@@ -322,11 +322,9 @@ static bool IsMinigameOrCutsceneActive(APlayerController* Controller, AThiefPawn
 
                     // Minigames and special states that force native first person:
                     // - Lockpicking: UThiefCameraLockpick
-                    // - Bow Aiming: UThiefCameraMarksman / MarksmanAim
                     // - Keyholes / Peepholes / Crawlspaces: UThiefCameraSmartObjectDriven
                     // - Safe Cracking / Keypads: UThiefCameraSafe
                     if (strstr(className, "Lockpick") ||
-                        strstr(className, "Marksman") ||
                         strstr(className, "SmartObject") ||
                         strstr(className, "Safe") ||
                         strstr(className, "Keypad") ||
@@ -712,17 +710,97 @@ extern "C" void Hook_GetPlayerViewPoint(APlayerController* Controller, FVector* 
         g_CurrentCameraPos.Z += dz * alpha;
     }
 
+    // 12. Crosshair Alignment & Parallax Convergence (Fix for Bow & Interaction Aim):
+    // In 3rd person, the camera is offset by ShoulderOffset and HeightOffset.
+    // To ensure the screen-center crosshair aligns with Garrett's true aim point (as in 1st person),
+    // we trace from Garrett's head along his forward aim vector to find the target impact point,
+    // then angle the camera view matrix to look directly at that target point.
+    static float s_CurrentDeltaPitch = 0.0f;
+    static float s_CurrentDeltaYaw = 0.0f;
+
+    if (pWorld && IsValidReadPtr(pWorld, 0x100) && pLineCheck)
+    {
+        constexpr float MAX_AIM_TRACE = 6000.0f;
+        FVector aimEnd;
+        aimEnd.X = headPos.X + (forward.X * MAX_AIM_TRACE);
+        aimEnd.Y = headPos.Y + (forward.Y * MAX_AIM_TRACE);
+        aimEnd.Z = headPos.Z + (forward.Z * MAX_AIM_TRACE);
+
+        FCheckResult aimHit;
+        aimHit.Time = 1.0f;
+        FVector zeroExtent(0.0f, 0.0f, 0.0f); // Point probe for exact line of sight
+        uint32_t clear = pLineCheck(pWorld, &aimHit, (AActor*)hero, &aimEnd, &headPos, CollisionFlags::TRACE_CameraProbe, 1, &zeroExtent, nullptr, nullptr);
+
+        float aimDist = MAX_AIM_TRACE;
+        if (clear == 0 && aimHit.Time < 1.0f)
+        {
+            aimDist = MAX_AIM_TRACE * aimHit.Time;
+        }
+
+        // Clamp minimum convergence distance to prevent camera cross-eye when standing adjacent to walls
+        if (aimDist < 200.0f)
+            aimDist = 200.0f;
+
+        FVector aimTarget;
+        aimTarget.X = headPos.X + (forward.X * aimDist);
+        aimTarget.Y = headPos.Y + (forward.Y * aimDist);
+        aimTarget.Z = headPos.Z + (forward.Z * aimDist);
+
+        FVector camToTarget;
+        camToTarget.X = aimTarget.X - g_CurrentCameraPos.X;
+        camToTarget.Y = aimTarget.Y - g_CurrentCameraPos.Y;
+        camToTarget.Z = aimTarget.Z - g_CurrentCameraPos.Z;
+
+        float hDist = sqrtf(camToTarget.X * camToTarget.X + camToTarget.Y * camToTarget.Y);
+        if (hDist > 1.0f)
+        {
+            constexpr float RAD_TO_UROT = 32768.0f / 3.14159265358979323846f;
+            int32_t desiredPitch = (int32_t)(atan2f(camToTarget.Z, hDist) * RAD_TO_UROT);
+            int32_t desiredYaw   = (int32_t)(atan2f(camToTarget.Y, camToTarget.X) * RAD_TO_UROT);
+
+            int32_t deltaPitch = desiredPitch - OutRotation->Pitch;
+            int32_t deltaYaw   = desiredYaw   - OutRotation->Yaw;
+
+            // Handle 16-bit angle wrapping (-32768 to +32767)
+            while (deltaPitch > 32767)  deltaPitch -= 65536;
+            while (deltaPitch < -32768) deltaPitch += 65536;
+            while (deltaYaw > 32767)    deltaYaw   -= 65536;
+            while (deltaYaw < -32768)   deltaYaw   += 65536;
+
+            // Clamp max convergence delta to prevent extreme angles
+            constexpr int32_t MAX_CONVERGE_DELTA = 1600; // ~8.8 degrees
+            if (deltaPitch > MAX_CONVERGE_DELTA) deltaPitch = MAX_CONVERGE_DELTA;
+            if (deltaPitch < -MAX_CONVERGE_DELTA) deltaPitch = -MAX_CONVERGE_DELTA;
+            if (deltaYaw > MAX_CONVERGE_DELTA) deltaYaw = MAX_CONVERGE_DELTA;
+            if (deltaYaw < -MAX_CONVERGE_DELTA) deltaYaw = -MAX_CONVERGE_DELTA;
+
+            if (g_bFirstFrameAfterToggle)
+            {
+                s_CurrentDeltaPitch = (float)deltaPitch;
+                s_CurrentDeltaYaw   = (float)deltaYaw;
+            }
+            else
+            {
+                s_CurrentDeltaPitch += ((float)deltaPitch - s_CurrentDeltaPitch) * 0.4f;
+                s_CurrentDeltaYaw   += ((float)deltaYaw   - s_CurrentDeltaYaw)   * 0.4f;
+            }
+
+            OutRotation->Pitch += (int32_t)s_CurrentDeltaPitch;
+            OutRotation->Yaw   += (int32_t)s_CurrentDeltaYaw;
+        }
+    }
+
     if (s_FrameLogCount < 5)
     {
         s_FrameLogCount++;
         char buf[128];
         int hx = (int)headPos.X, hy = (int)headPos.Y, hz = (int)headPos.Z;
         int cx = (int)g_CurrentCameraPos.X, cy = (int)g_CurrentCameraPos.Y, cz = (int)g_CurrentCameraPos.Z;
-        wsprintfA(buf, "[CameraMod] View transformed: Head(%d,%d,%d) -> Cam(%d,%d,%d) Dist=%.1f", hx, hy, hz, cx, cy, cz, g_CurrentCameraDistance);
+        wsprintfA(buf, "[CameraMod] View transformed: Head(%d,%d,%d) -> Cam(%d,%d,%d) Dist=%.1f dP=%d dY=%d", hx, hy, hz, cx, cy, cz, g_CurrentCameraDistance, (int)s_CurrentDeltaPitch, (int)s_CurrentDeltaYaw);
         ModLog(buf);
     }
 
-    // 12. Write modified location into renderer's view info
+    // 13. Write modified location into renderer's view info
     *OutLocation = g_CurrentCameraPos;
 }
 
